@@ -7,4 +7,5 @@ homebridge-pulse8-appletv-cec.xcodeproj/
 tsconfig.json
 test-cec.mjs
 SPEC.md
+HOMEBRIDGE_PLUGIN_SETUP.md
 .DS_Store

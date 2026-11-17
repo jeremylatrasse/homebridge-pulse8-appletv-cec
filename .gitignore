@@ -22,3 +22,6 @@ Thumbs.db
 DerivedData/
 .build/
 Products/
+
+# Local setup documentation
+HOMEBRIDGE_PLUGIN_SETUP.md
