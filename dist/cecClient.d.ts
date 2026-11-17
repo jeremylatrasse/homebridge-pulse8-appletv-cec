@@ -50,6 +50,18 @@ export interface CecClientOptions {
     rescanIntervalSec?: number;
     rawSender?: (cmd: string) => void;
 }
+export interface ResolveCecClientOptions {
+    configuredPath?: string;
+    envPath?: string;
+    extraSearchDirs?: string[];
+    isExecutable?: (candidate: string) => boolean;
+}
+export declare const DEFAULT_CEC_SEARCH_DIRS: string[];
+/**
+ * Resolve the `cec-client` executable across `PATH` and common macOS/Linux installation directories.
+ * Homebridge services (launchd/systemd/Docker) frequently run with a minimal PATH that omits `/opt/homebrew/bin`.
+ */
+export declare function resolveCecClientPath(options?: ResolveCecClientOptions): string | null;
 /**
  * Parse a `cec-client` `scan` output block into structured CEC devices.
  */
@@ -81,6 +93,9 @@ export declare class Pulse8CecClient extends EventEmitter {
     private inScan;
     private scanBuffer;
     private lastScanRequestedAt;
+    private missingBinaryLogged;
+    private consecutiveStartFailures;
+    private recentDiagnostics;
     private readonly discoveredAppleTvs;
     private readonly powerStates;
     private readonly lastPowerTransitionAt;
@@ -94,6 +109,7 @@ export declare class Pulse8CecClient extends EventEmitter {
     sendRaw(cmd: string): void;
     enableSystemAudioMode(): void;
     handleLine(line: string): void;
+    private pushDiagnostic;
     private scheduleScanSettle;
     private finalizeScan;
     private clearScanTimers;

@@ -1,5 +1,7 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { accessSync, constants, statSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import * as readline from 'node:readline';
 
 export type CecHoldMode = 'longPress' | 'repeat';
@@ -60,6 +62,13 @@ export interface CecClientOptions {
   rawSender?: (cmd: string) => void;
 }
 
+export interface ResolveCecClientOptions {
+  configuredPath?: string;
+  envPath?: string;
+  extraSearchDirs?: string[];
+  isExecutable?: (candidate: string) => boolean;
+}
+
 interface HoldState {
   key: 'volumeUp' | 'volumeDown';
   longFired: boolean;
@@ -71,6 +80,85 @@ interface HoldState {
 }
 
 const PLAYBACK_LOGICAL_ADDRESSES = new Set(['3', '4', '6', '8', 'b']);
+
+export const DEFAULT_CEC_SEARCH_DIRS = [
+  '/opt/homebrew/bin',
+  '/opt/homebrew/sbin',
+  '/usr/local/bin',
+  '/usr/local/sbin',
+  '/usr/bin',
+  '/bin',
+  '/opt/local/bin',
+  '/snap/bin',
+  '/home/linuxbrew/.linuxbrew/bin',
+];
+
+function defaultIsExecutable(filePath: string): boolean {
+  try {
+    const st = statSync(filePath);
+    if (!st.isFile()) {
+      return false;
+    }
+    accessSync(filePath, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the `cec-client` executable across `PATH` and common macOS/Linux installation directories.
+ * Homebridge services (launchd/systemd/Docker) frequently run with a minimal PATH that omits `/opt/homebrew/bin`.
+ */
+export function resolveCecClientPath(options: ResolveCecClientOptions = {}): string | null {
+  const requested = options.configuredPath?.trim() || 'cec-client';
+  const isExecutable = options.isExecutable ?? defaultIsExecutable;
+
+  if (requested.includes('/') || requested.includes('\\')) {
+    return isExecutable(requested) ? requested : null;
+  }
+
+  const envDirs = (options.envPath ?? process.env.PATH ?? '')
+    .split(delimiter)
+    .map((dir) => dir.trim())
+    .filter((dir) => dir.length > 0);
+  const extraDirs = options.extraSearchDirs ?? DEFAULT_CEC_SEARCH_DIRS;
+
+  const seen = new Set<string>();
+  for (const dir of [...envDirs, ...extraDirs]) {
+    if (seen.has(dir)) {
+      continue;
+    }
+    seen.add(dir);
+    const candidate = join(dir, requested);
+    if (isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function buildAugmentedEnv(): NodeJS.ProcessEnv {
+  const existingDirs = (process.env.PATH ?? '')
+    .split(delimiter)
+    .map((dir) => dir.trim())
+    .filter((dir) => dir.length > 0);
+
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const dir of [...existingDirs, ...DEFAULT_CEC_SEARCH_DIRS]) {
+    if (!seen.has(dir)) {
+      seen.add(dir);
+      merged.push(dir);
+    }
+  }
+
+  return {
+    ...process.env,
+    PATH: merged.join(delimiter),
+  };
+}
 
 /**
  * Parse a `cec-client` `scan` output block into structured CEC devices.
@@ -207,6 +295,9 @@ export class Pulse8CecClient extends EventEmitter {
   private inScan = false;
   private scanBuffer: string[] = [];
   private lastScanRequestedAt = 0;
+  private missingBinaryLogged = false;
+  private consecutiveStartFailures = 0;
+  private recentDiagnostics: string[] = [];
 
   // Discovered Apple TVs keyed by lowercase hex logical address nibble ('4', '8', 'b', ...)
   private readonly discoveredAppleTvs = new Map<string, CecDiscoveredDevice>();
@@ -242,6 +333,36 @@ export class Pulse8CecClient extends EventEmitter {
       return;
     }
 
+    if (this.respawnTimer) {
+      clearTimeout(this.respawnTimer);
+      this.respawnTimer = null;
+    }
+
+    const resolvedBinary = resolveCecClientPath({ configuredPath: this.cecClientPath });
+    if (!resolvedBinary) {
+      const retryDelayMs = 60000;
+      const isDefaultName =
+        this.cecClientPath === 'cec-client' &&
+        !this.cecClientPath.includes('/') &&
+        !this.cecClientPath.includes('\\');
+      const msg = isDefaultName
+        ? '[CEC] Could not find "cec-client" in PATH or standard locations (/opt/homebrew/bin, /usr/local/bin, /usr/bin). Install libcec (macOS: "brew install libcec", Debian/Ubuntu: "sudo apt-get install -y cec-utils") or set "cecClientPath" in plugin config. Checking again in 60s...'
+        : `[CEC] Configured cecClientPath "${this.cecClientPath}" was not found or is not executable. Update "cecClientPath" in plugin config. Checking again in 60s...`;
+
+      if (!this.missingBinaryLogged) {
+        this.missingBinaryLogged = true;
+        this.log.error(msg);
+      } else {
+        this.log.debug(msg);
+      }
+
+      this.respawnTimer = setTimeout(() => this.start(), retryDelayMs);
+      return;
+    }
+
+    this.missingBinaryLogged = false;
+    this.recentDiagnostics = [];
+
     const args = ['-t', 'a', '-d', '8'];
     if (this.osdName) {
       args.push('-o', this.osdName);
@@ -255,10 +376,11 @@ export class Pulse8CecClient extends EventEmitter {
 
     this.adapterReady = false;
     this.log.info(
-      `[CEC] Starting ${this.cecClientPath} ${args.join(' ')}`,
+      `[CEC] Starting ${resolvedBinary} ${args.join(' ')}`,
     );
 
-    const proc = spawn(this.cecClientPath, args);
+    let spawnError: NodeJS.ErrnoException | null = null;
+    const proc = spawn(resolvedBinary, args, { env: buildAugmentedEnv() });
     this.proc = proc;
 
     this.rl = readline.createInterface({ input: proc.stdout });
@@ -267,17 +389,20 @@ export class Pulse8CecClient extends EventEmitter {
     proc.stderr.on('data', (data: Buffer) => {
       const msg = data.toString('utf8').trim();
       if (msg) {
+        this.pushDiagnostic(msg);
         this.log.debug(`[CEC stderr] ${msg}`);
       }
     });
 
-    proc.on('error', (err: Error) => {
-      this.log.error(`[CEC] Failed to spawn ${this.cecClientPath}: ${err.message}`);
+    proc.on('error', (err: NodeJS.ErrnoException) => {
+      spawnError = err;
+      this.log.error(`[CEC] Failed to spawn ${resolvedBinary}: ${err.message}`);
     });
 
     proc.on('close', (code: number | null) => {
       this.stopAllHolds();
       this.clearScanTimers();
+      const wasReady = this.adapterReady;
       this.adapterReady = false;
       if (this.rl) {
         this.rl.close();
@@ -285,10 +410,34 @@ export class Pulse8CecClient extends EventEmitter {
       }
       this.proc = null;
 
-      if (!this.isShuttingDown) {
-        this.log.warn(`[CEC] cec-client exited with code ${code ?? 'unknown'}. Respawning in 3s...`);
-        this.respawnTimer = setTimeout(() => this.start(), 3000);
+      if (this.isShuttingDown) {
+        return;
       }
+
+      if (spawnError) {
+        const retryMs =
+          spawnError.code === 'ENOENT' || spawnError.code === 'EACCES' ? 60000 : 10000;
+        this.log.warn(`[CEC] Unable to launch cec-client (${spawnError.code || spawnError.message}). Retrying in ${Math.round(retryMs / 1000)}s...`);
+        this.respawnTimer = setTimeout(() => this.start(), retryMs);
+        return;
+      }
+
+      if (!wasReady && code !== 0 && this.recentDiagnostics.length > 0) {
+        this.log.warn(`[CEC] Diagnostic output: ${this.recentDiagnostics.join(' | ')}`);
+      }
+
+      this.consecutiveStartFailures = wasReady ? 0 : this.consecutiveStartFailures + 1;
+      const respawnDelayMs =
+        this.consecutiveStartFailures >= 5
+          ? 30000
+          : this.consecutiveStartFailures >= 3
+            ? 15000
+            : 3000;
+
+      this.log.warn(
+        `[CEC] cec-client exited with code ${code ?? 'unknown'}. Respawning in ${Math.round(respawnDelayMs / 1000)}s...`,
+      );
+      this.respawnTimer = setTimeout(() => this.start(), respawnDelayMs);
     });
 
     if (this.rescanIntervalSec > 0 && !this.rescanTimer) {
@@ -365,6 +514,13 @@ export class Pulse8CecClient extends EventEmitter {
       return;
     }
 
+    if (
+      !this.adapterReady &&
+      /\b(error|failed|unable to|permission denied|no adapters found)\b/i.test(trimmed)
+    ) {
+      this.pushDiagnostic(trimmed);
+    }
+
     // 1. Capture `scan` output lines
     if (/^device\s+#[0-9a-fA-F]+\s*:/i.test(trimmed)) {
       this.inScan = true;
@@ -394,6 +550,7 @@ export class Pulse8CecClient extends EventEmitter {
       (trimmed.includes('waiting for input') || trimmed.includes('TRAFFIC:') || trimmed.includes('>>'))
     ) {
       this.adapterReady = true;
+      this.consecutiveStartFailures = 0;
       this.log.info('[CEC] Pulse-Eight adapter ready. Enabling System Audio Mode and scanning bus...');
       this.enableSystemAudioMode();
       if (trimmed.includes('waiting for input')) {
@@ -410,6 +567,13 @@ export class Pulse8CecClient extends EventEmitter {
     }
 
     this.handleTrafficFrame(frame);
+  }
+
+  private pushDiagnostic(msg: string): void {
+    this.recentDiagnostics.push(msg);
+    if (this.recentDiagnostics.length > 6) {
+      this.recentDiagnostics.shift();
+    }
   }
 
   private scheduleScanSettle(): void {

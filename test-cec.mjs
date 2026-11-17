@@ -3,7 +3,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Pulse8CecClient, parseScanOutput, parseTrafficFrame } from './dist/cecClient.js';
+import {
+  Pulse8CecClient,
+  parseScanOutput,
+  parseTrafficFrame,
+  resolveCecClientPath,
+} from './dist/cecClient.js';
 import { matchesAppleTvFilter } from './dist/platform.js';
 import { sanitizeHomeKitName } from './dist/platformAccessory.js';
 import {
@@ -35,6 +40,49 @@ assert.strictEqual(schema.schema.properties.trinnovPort.default, 44100);
 
 // 2. Test sanitizeHomeKitName
 assert.strictEqual(sanitizeHomeKitName('Living Room (Apple TV)'), 'Living Room Apple TV');
+
+// 2b. Test resolveCecClientPath across restricted Homebridge PATHs and missing binaries
+assert.strictEqual(
+  resolveCecClientPath({
+    configuredPath: 'cec-client',
+    envPath: '/usr/bin:/bin',
+    isExecutable: (p) => p === '/opt/homebrew/bin/cec-client',
+  }),
+  '/opt/homebrew/bin/cec-client',
+);
+assert.strictEqual(
+  resolveCecClientPath({
+    configuredPath: '/custom/bin/cec-client',
+    envPath: '/usr/bin:/bin',
+    isExecutable: (p) => p === '/custom/bin/cec-client',
+  }),
+  '/custom/bin/cec-client',
+);
+assert.strictEqual(
+  resolveCecClientPath({
+    configuredPath: '/nonexistent/cec-client',
+    isExecutable: () => false,
+  }),
+  null,
+);
+
+// 2c. Test Pulse8CecClient missing binary handling (no -2 crash loop)
+const missingLogs = { errors: [], warns: [] };
+const missingClient = new Pulse8CecClient(
+  { cecClientPath: '/nonexistent/path/to/cec-client-missing' },
+  {
+    info: () => {},
+    warn: (m) => missingLogs.warns.push(m),
+    error: (m) => missingLogs.errors.push(m),
+    debug: () => {},
+  },
+);
+missingClient.start();
+await sleep(30);
+missingClient.stop();
+assert.strictEqual(missingLogs.errors.length, 1);
+assert.match(missingLogs.errors[0], /was not found or is not executable/i);
+assert.strictEqual(missingLogs.warns.length, 0);
 
 // 3. Test parseScanOutput with multiple Apple TVs (including decimal #11 -> hex 'b' and custom OSD name)
 const scanLines = [
