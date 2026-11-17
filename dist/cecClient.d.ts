@@ -24,6 +24,12 @@ export interface CecKeyEvent {
     pressType: CecPressType;
     timestamp: number;
 }
+export interface CecVolumeCommandEvent {
+    logicalAddress: string;
+    key: CecKeyType;
+    isRepeat: boolean;
+    timestamp: number;
+}
 export interface CecTrafficFrame {
     src: string;
     dst: string;
@@ -99,4 +105,5 @@ export declare class Pulse8CecClient extends EventEmitter {
     private stopHold;
     private stopAllHolds;
     private emitKeyEvent;
+    private emitVolumeCommand;
 }

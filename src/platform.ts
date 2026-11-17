@@ -15,6 +15,7 @@ import {
   CecDiscoveredDevice,
   CecHoldMode,
   CecKeyEvent,
+  CecVolumeCommandEvent,
   Pulse8CecClient,
 } from './cecClient';
 import {
@@ -22,12 +23,25 @@ import {
   Pulse8AppleTvAccessory,
   sanitizeHomeKitName,
 } from './platformAccessory';
+import {
+  TrinnovClientPool,
+  TrinnovControlMode,
+  TrinnovMuteAction,
+  TrinnovTargetResolver,
+} from './trinnovClient';
 
 interface AccessoryContext {
   logicalAddress?: string;
   physicalAddress?: string;
   osdString?: string;
   portKey?: string;
+}
+
+interface ActiveAppleTvEntry {
+  handler: Pulse8AppleTvAccessory;
+  override?: AppleTvFilterConfig;
+  displayName: string;
+  osdString: string;
 }
 
 function loadPluginVersion(): string {
@@ -61,9 +75,12 @@ export class Pulse8AppleTvCecPlatform implements DynamicPlatformPlugin {
   public readonly Characteristic: typeof Characteristic;
 
   public readonly accessories: PlatformAccessory[] = [];
-  private readonly activeByLogicalAddress = new Map<string, Pulse8AppleTvAccessory>();
+  private readonly activeByLogicalAddress = new Map<string, ActiveAppleTvEntry>();
   private readonly pluginVersion = loadPluginVersion();
   private cecClient: Pulse8CecClient | null = null;
+  private trinnovResolver: TrinnovTargetResolver | null = null;
+  private trinnovPool: TrinnovClientPool | null = null;
+  private trinnovMuteAction: TrinnovMuteAction = 'toggle';
   private registeredPlatformName = PLATFORM_NAME;
 
   constructor(
@@ -90,6 +107,14 @@ export class Pulse8AppleTvCecPlatform implements DynamicPlatformPlugin {
         this.cecClient.stop();
         this.cecClient = null;
       }
+      if (this.trinnovResolver) {
+        this.trinnovResolver.stop();
+        this.trinnovResolver = null;
+      }
+      if (this.trinnovPool) {
+        this.trinnovPool.stopAll();
+        this.trinnovPool = null;
+      }
     });
   }
 
@@ -98,7 +123,62 @@ export class Pulse8AppleTvCecPlatform implements DynamicPlatformPlugin {
     this.accessories.push(accessory);
   }
 
+  private getConfiguredDeviceFilters(): AppleTvFilterConfig[] {
+    return Array.isArray(this.config.devices)
+      ? (this.config.devices as AppleTvFilterConfig[])
+      : [];
+  }
+
   private startCecBridge(): void {
+    const trinnovControlRaw = this.config.trinnovControl as string | undefined;
+    const trinnovControl: TrinnovControlMode =
+      trinnovControlRaw === 'enabled' || trinnovControlRaw === 'disabled'
+        ? trinnovControlRaw
+        : 'auto';
+    this.trinnovMuteAction =
+      this.config.trinnovMuteAction === 'ignore' ? 'ignore' : 'toggle';
+
+    const resolver = new TrinnovTargetResolver(
+      {
+        mode: trinnovControl,
+        host: this.config.trinnovHost as string | undefined,
+        port: this.config.trinnovPort as number | undefined,
+        volumeStepDb: this.config.trinnovVolumeStepDb as number | undefined,
+        discoveryUrl: this.config.trinnovDiscoveryUrl as string | undefined,
+        storagePath: this.api.user.storagePath(),
+        configPath: this.api.user.configPath(),
+      },
+      this.log,
+    );
+    resolver.start();
+    this.trinnovResolver = resolver;
+
+    const initialCandidates = resolver.getCandidateList();
+    if (this.config.trinnovHost) {
+      this.log.info(
+        `[Trinnov] Configured direct target: ${this.config.trinnovHost}:${(this.config.trinnovPort as number | undefined) ?? 44100}`,
+      );
+    } else if (initialCandidates.length > 0) {
+      const summary = initialCandidates
+        .map((c) => `${c.name || c.id || 'Trinnov'} (${c.host}:${c.port} via ${c.source})`)
+        .join(', ');
+      this.log.info(`[Trinnov] Auto-discovered target(s): ${summary}`);
+    } else if (trinnovControl !== 'disabled') {
+      this.log.info(
+        '[Trinnov] No Trinnov target discovered yet; watching Homebridge storagePath/config for homebridge-trinnov.',
+      );
+    }
+
+    this.trinnovPool = new TrinnovClientPool(
+      {
+        clientId: this.config.trinnovClientId as string | undefined,
+        idleTimeoutMs: this.config.trinnovIdleTimeoutMs as number | undefined,
+      },
+      this.log,
+    );
+
+    const activeFilters = this.getConfiguredDeviceFilters().filter((f) => f.enabled !== false);
+
     // Rehydrate cached accessories immediately so buttons remain wired if traffic arrives before scan finishes
     for (const cached of this.accessories) {
       const ctx = (cached.context || {}) as AccessoryContext;
@@ -120,7 +200,15 @@ export class Pulse8AppleTvCecPlatform implements DynamicPlatformPlugin {
           cached.displayName,
           this.pluginVersion,
         );
-        this.activeByLogicalAddress.set(ctx.logicalAddress, handler);
+        const matchingOverride = activeFilters.find((f) =>
+          matchesAppleTvFilter(placeholderDevice, f),
+        );
+        this.activeByLogicalAddress.set(ctx.logicalAddress, {
+          handler,
+          override: matchingOverride,
+          displayName: cached.displayName,
+          osdString: placeholderDevice.osdString,
+        });
       }
     }
 
@@ -144,21 +232,54 @@ export class Pulse8AppleTvCecPlatform implements DynamicPlatformPlugin {
     });
 
     client.on('keyPress', (event: CecKeyEvent) => {
-      const target = this.activeByLogicalAddress.get(event.logicalAddress);
-      if (target) {
-        target.triggerKeyEvent(event.key, event.pressType);
-        return;
+      const entry = this.findEntryForLogicalAddress(event.logicalAddress);
+      if (entry) {
+        entry.handler.triggerKeyEvent(event.key, event.pressType);
       }
+    });
 
-      // Fallback if traffic arrived before scan completed and only 1 cached accessory exists
-      if (this.activeByLogicalAddress.size === 1) {
-        const sole = Array.from(this.activeByLogicalAddress.values())[0];
-        sole.triggerKeyEvent(event.key, event.pressType);
-      }
+    client.on('volumeCommand', (event: CecVolumeCommandEvent) => {
+      this.handleVolumeCommand(event);
     });
 
     this.cecClient = client;
     client.start();
+  }
+
+  private findEntryForLogicalAddress(logicalAddress: string): ActiveAppleTvEntry | undefined {
+    const exact = this.activeByLogicalAddress.get(logicalAddress);
+    if (exact) {
+      return exact;
+    }
+    // Fallback if traffic arrived before scan completed and only 1 cached accessory exists
+    if (this.activeByLogicalAddress.size === 1) {
+      return Array.from(this.activeByLogicalAddress.values())[0];
+    }
+    return undefined;
+  }
+
+  private handleVolumeCommand(event: CecVolumeCommandEvent): void {
+    if (!this.trinnovResolver || !this.trinnovPool) {
+      return;
+    }
+
+    const entry = this.findEntryForLogicalAddress(event.logicalAddress);
+    const resolved = this.trinnovResolver.resolveForAppleTv({
+      displayName: entry?.displayName || 'Apple TV',
+      osdString: entry?.osdString || 'Apple TV',
+      deviceOverride: entry?.override,
+    });
+    if (!resolved) {
+      return;
+    }
+
+    if (event.key === 'volumeUp') {
+      this.trinnovPool.adjustVolume(resolved.target, resolved.stepDb);
+    } else if (event.key === 'volumeDown') {
+      this.trinnovPool.adjustVolume(resolved.target, -resolved.stepDb);
+    } else if (event.key === 'mute' && this.trinnovMuteAction !== 'ignore') {
+      this.trinnovPool.toggleMute(resolved.target);
+    }
   }
 
   private reconcileDiscoveredAppleTvs(discoveredAppleTvs: CecDiscoveredDevice[]): void {
@@ -167,9 +288,7 @@ export class Pulse8AppleTvCecPlatform implements DynamicPlatformPlugin {
       return;
     }
 
-    const filters = Array.isArray(this.config.devices)
-      ? (this.config.devices as AppleTvFilterConfig[])
-      : [];
+    const filters = this.getConfiguredDeviceFilters();
     const activeFilters = filters.filter((f) => f.enabled !== false);
     const disabledFilters = filters.filter((f) => f.enabled === false);
 
@@ -239,7 +358,12 @@ export class Pulse8AppleTvCecPlatform implements DynamicPlatformPlugin {
           displayName,
           this.pluginVersion,
         );
-        this.activeByLogicalAddress.set(device.logicalAddress, handler);
+        this.activeByLogicalAddress.set(device.logicalAddress, {
+          handler,
+          override,
+          displayName,
+          osdString: device.osdString,
+        });
         this.api.updatePlatformAccessories([existingAccessory]);
       } else {
         this.log.info(
@@ -259,7 +383,12 @@ export class Pulse8AppleTvCecPlatform implements DynamicPlatformPlugin {
           displayName,
           this.pluginVersion,
         );
-        this.activeByLogicalAddress.set(device.logicalAddress, handler);
+        this.activeByLogicalAddress.set(device.logicalAddress, {
+          handler,
+          override,
+          displayName,
+          osdString: device.osdString,
+        });
         this.api.registerPlatformAccessories(PLUGIN_NAME, this.registeredPlatformName, [accessory]);
         this.accessories.push(accessory);
       }

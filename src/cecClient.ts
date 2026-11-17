@@ -31,6 +31,13 @@ export interface CecKeyEvent {
   timestamp: number;
 }
 
+export interface CecVolumeCommandEvent {
+  logicalAddress: string;
+  key: CecKeyType;
+  isRepeat: boolean;
+  timestamp: number;
+}
+
 export interface CecTrafficFrame {
   src: string;
   dst: string;
@@ -58,6 +65,8 @@ interface HoldState {
   longFired: boolean;
   delayTimer: NodeJS.Timeout | null;
   repeatTimer: NodeJS.Timeout | null;
+  directDelayTimer: NodeJS.Timeout | null;
+  directRepeatTimer: NodeJS.Timeout | null;
   safetyTimer: NodeJS.Timeout | null;
 }
 
@@ -507,6 +516,7 @@ export class Pulse8CecClient extends EventEmitter {
         } else if (arg === '43') {
           this.stopHold(src);
           this.emitKeyEvent(src, 'mute', 'single');
+          this.emitVolumeCommand(src, 'mute', false);
         } else if (arg === '40' || arg === '6c') {
           // Remote power button intentionally ignored
           this.log.debug(`[CEC] Ignoring remote power key (44:${arg}) from logical address ${src}`);
@@ -581,21 +591,36 @@ export class Pulse8CecClient extends EventEmitter {
       longFired: false,
       delayTimer: null,
       repeatTimer: null,
+      directDelayTimer: null,
+      directRepeatTimer: null,
       safetyTimer: null,
     };
+
+    // Always emit an immediate direct volume command on press
+    this.emitVolumeCommand(src, key, false);
 
     if (this.holdMode === 'repeat') {
       this.emitKeyEvent(src, key, 'single');
       hold.delayTimer = setTimeout(() => {
         this.emitKeyEvent(src, key, 'single');
+        this.emitVolumeCommand(src, key, true);
         hold.repeatTimer = setInterval(() => {
           this.emitKeyEvent(src, key, 'single');
+          this.emitVolumeCommand(src, key, true);
         }, this.holdRepeatMs);
       }, this.holdDelayMs);
     } else {
       hold.delayTimer = setTimeout(() => {
         hold.longFired = true;
         this.emitKeyEvent(src, key, 'long');
+      }, this.holdDelayMs);
+
+      // Even when HomeKit buttons use longPress mode, direct Trinnov volume control smoothly steps while held
+      hold.directDelayTimer = setTimeout(() => {
+        this.emitVolumeCommand(src, key, true);
+        hold.directRepeatTimer = setInterval(() => {
+          this.emitVolumeCommand(src, key, true);
+        }, this.holdRepeatMs);
       }, this.holdDelayMs);
     }
 
@@ -632,6 +657,12 @@ export class Pulse8CecClient extends EventEmitter {
     if (existing.repeatTimer) {
       clearInterval(existing.repeatTimer);
     }
+    if (existing.directDelayTimer) {
+      clearTimeout(existing.directDelayTimer);
+    }
+    if (existing.directRepeatTimer) {
+      clearInterval(existing.directRepeatTimer);
+    }
     if (existing.safetyTimer) {
       clearTimeout(existing.safetyTimer);
     }
@@ -653,5 +684,15 @@ export class Pulse8CecClient extends EventEmitter {
     };
     this.log.info(`[CEC] Apple TV (${logicalAddress}) ${key} -> ${pressType.toUpperCase()}`);
     this.emit('keyPress', event);
+  }
+
+  private emitVolumeCommand(logicalAddress: string, key: CecKeyType, isRepeat: boolean): void {
+    const event: CecVolumeCommandEvent = {
+      logicalAddress,
+      key,
+      isRepeat,
+      timestamp: Date.now(),
+    };
+    this.emit('volumeCommand', event);
   }
 }

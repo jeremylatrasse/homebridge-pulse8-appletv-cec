@@ -12,9 +12,15 @@ export declare class Pulse8AppleTvCecPlatform implements DynamicPlatformPlugin {
     private readonly activeByLogicalAddress;
     private readonly pluginVersion;
     private cecClient;
+    private trinnovResolver;
+    private trinnovPool;
+    private trinnovMuteAction;
     private registeredPlatformName;
     constructor(log: Logger, config: PlatformConfig, api: API);
     configureAccessory(accessory: PlatformAccessory): void;
+    private getConfiguredDeviceFilters;
     private startCecBridge;
+    private findEntryForLogicalAddress;
+    private handleVolumeCommand;
     private reconcileDiscoveredAppleTvs;
 }

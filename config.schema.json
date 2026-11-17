@@ -3,7 +3,7 @@
   "pluginType": "platform",
   "singular": true,
   "headerDisplay": "Pulse-Eight USB-CEC Apple TV Remote Bridge for Homebridge",
-  "footerDisplay": "Captures Apple TV Siri Remote HDMI-CEC Volume Up, Volume Down, and Mute presses via cec-client (libcec) and exposes them as native HomeKit StatelessProgrammableSwitch buttons so you can automate any Homebridge device.",
+  "footerDisplay": "Captures Apple TV Siri Remote HDMI-CEC Volume Up, Volume Down, and Mute presses via cec-client (libcec) and exposes them as native HomeKit StatelessProgrammableSwitch buttons, with optional direct Trinnov TCP port 44100 control via homebridge-trinnov discovery.",
   "schema": {
     "type": "object",
     "properties": {
@@ -61,7 +61,7 @@
         "description": "Optional HDMI port number (-p) if cec-client needs an explicit port for your receiver/switch."
       },
       "holdMode": {
-        "title": "Volume Hold Behavior",
+        "title": "Volume Hold Behavior (HomeKit Switches)",
         "type": "string",
         "default": "longPress",
         "oneOf": [
@@ -74,7 +74,7 @@
             "enum": ["repeat"]
           }
         ],
-        "description": "How holding Volume Up or Volume Down on the Siri Remote maps to HomeKit StatelessProgrammableSwitch events."
+        "description": "How holding Volume Up or Volume Down on the Siri Remote maps to HomeKit StatelessProgrammableSwitch events. Direct Trinnov volume control always steps continuously while held."
       },
       "holdDelayMs": {
         "title": "Hold Threshold Delay (ms)",
@@ -90,7 +90,7 @@
         "default": 150,
         "minimum": 50,
         "maximum": 1000,
-        "description": "Repeat interval in milliseconds when Volume Hold Behavior is set to Continuous Repeat."
+        "description": "Repeat interval in milliseconds while Volume Up or Volume Down is held."
       },
       "holdSafetyMs": {
         "title": "Hold Safety Timeout (ms)",
@@ -108,10 +108,88 @@
         "maximum": 3600,
         "description": "Optional interval to periodically re-scan the HDMI-CEC bus for newly connected Apple TVs (0 = only scan on startup and unknown device traffic)."
       },
+      "trinnovControl": {
+        "title": "Direct Trinnov Volume Control (TCP 44100)",
+        "type": "string",
+        "default": "auto",
+        "oneOf": [
+          {
+            "title": "Auto (Send directly to Trinnov TCP 44100 when discovered or configured)",
+            "enum": ["auto"]
+          },
+          {
+            "title": "Enabled (Always route volume/mute to Trinnov TCP 44100)",
+            "enum": ["enabled"]
+          },
+          {
+            "title": "Disabled (HomeKit StatelessProgrammableSwitch buttons only)",
+            "enum": ["disabled"]
+          }
+        ],
+        "description": "Controls whether CEC Volume Up, Volume Down, and Mute presses are sent directly to a Trinnov processor over TCP port 44100 using homebridge-trinnov discovery or Homebridge config."
+      },
+      "trinnovHost": {
+        "title": "Trinnov IP / Hostname Override (Optional)",
+        "type": "string",
+        "placeholder": "192.168.1.50",
+        "description": "Leave blank to auto-discover the Trinnov IP from homebridge-trinnov (homebridge-trinnov-discovery.json / HTTP discovery) or Homebridge config.json."
+      },
+      "trinnovPort": {
+        "title": "Trinnov TCP Port",
+        "type": "integer",
+        "default": 44100,
+        "minimum": 1,
+        "maximum": 65535,
+        "description": "Trinnov automation protocol TCP port (default: 44100)."
+      },
+      "trinnovVolumeStepDb": {
+        "title": "Trinnov Volume Step (dB)",
+        "type": "number",
+        "default": 1,
+        "minimum": 0.1,
+        "maximum": 6,
+        "description": "Volume change in dB sent via 'dvolume' on each tap or hold repeat tick (e.g. 0.5 or 1)."
+      },
+      "trinnovMuteAction": {
+        "title": "Trinnov Mute Action",
+        "type": "string",
+        "default": "toggle",
+        "oneOf": [
+          {
+            "title": "Toggle Mute (mute 2)",
+            "enum": ["toggle"]
+          },
+          {
+            "title": "Ignore Mute Button",
+            "enum": ["ignore"]
+          }
+        ],
+        "description": "Action sent to Trinnov when the Siri Remote Mute button is pressed."
+      },
+      "trinnovDiscoveryUrl": {
+        "title": "homebridge-trinnov Discovery URL (Optional)",
+        "type": "string",
+        "placeholder": "http://127.0.0.1:44180/api/cec/targets",
+        "description": "Optional HTTP endpoint exposed by homebridge-trinnov when running on a separate host/container without shared Homebridge storagePath."
+      },
+      "trinnovClientId": {
+        "title": "Trinnov Client ID",
+        "type": "string",
+        "default": "homebridge-pulse8-appletv-cec",
+        "description": "Identifier sent in the Trinnov 'id <name>' handshake."
+      },
+      "trinnovIdleTimeoutMs": {
+        "title": "Trinnov Idle Disconnect Timeout (ms)",
+        "type": "integer",
+        "default": 60000,
+        "minimum": 0,
+        "maximum": 3600000,
+        "description": "Milliseconds of inactivity before sending 'bye' and closing the Trinnov TCP socket (0 = keep connected)."
+      },
       "devices": {
         "title": "Apple TV Filters & Overrides (Optional)",
         "type": "array",
-        "description": "By default, all Apple TVs found by 'cec-client scan' are exposed automatically. Add entries here only if you want to filter specific Apple TVs or customize their HomeKit names.",
+        "description": "By default, all Apple TVs found by 'cec-client scan' are exposed automatically. Add entries here only if you want to filter specific Apple TVs, customize their HomeKit names, or override their Trinnov target.",
         "items": {
           "title": "Apple TV Filter / Override",
           "type": "object",
@@ -150,6 +228,35 @@
               "type": "boolean",
               "default": true,
               "description": "Set to false to ignore this Apple TV."
+            },
+            "trinnovEnabled": {
+              "title": "Enable Direct Trinnov Control for this Apple TV",
+              "type": "boolean",
+              "default": true,
+              "description": "Set to false to prevent this Apple TV's remote from sending direct TCP commands to Trinnov."
+            },
+            "trinnovId": {
+              "title": "Target Trinnov Processor ID / Name (Optional)",
+              "type": "string",
+              "placeholder": "theater-trinnov",
+              "description": "Match a specific Trinnov processor from homebridge-trinnov discovery by its id or name."
+            },
+            "trinnovHost": {
+              "title": "Trinnov IP / Hostname Override (Optional)",
+              "type": "string",
+              "placeholder": "192.168.1.50"
+            },
+            "trinnovPort": {
+              "title": "Trinnov Port Override (Optional)",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "volumeStepDb": {
+              "title": "Volume Step Override (dB)",
+              "type": "number",
+              "minimum": 0.1,
+              "maximum": 6
             }
           }
         }

@@ -1,6 +1,6 @@
 {
   "name": "homebridge-pulse8-appletv-cec",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Homebridge dynamic platform plugin using a Pulse-Eight USB-CEC adapter (cec-client) to capture Apple TV Siri Remote HDMI-CEC button presses and expose them as native HomeKit programmable switches.",
   "license": "Apache-2.0",
   "repository": {

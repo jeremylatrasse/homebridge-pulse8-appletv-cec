@@ -1,8 +1,9 @@
 import { Service, PlatformAccessory } from 'homebridge';
 import { Pulse8AppleTvCecPlatform } from './platform';
 import { CecDiscoveredDevice, CecKeyType, CecPressType } from './cecClient';
+import { AppleTvTrinnovOverride } from './trinnovClient';
 
-export interface AppleTvFilterConfig {
+export interface AppleTvFilterConfig extends AppleTvTrinnovOverride {
   name?: string;
   id?: string;
   logicalAddress?: string;

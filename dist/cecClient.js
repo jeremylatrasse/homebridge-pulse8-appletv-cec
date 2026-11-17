@@ -422,6 +422,7 @@ class Pulse8CecClient extends node_events_1.EventEmitter {
                 else if (arg === '43') {
                     this.stopHold(src);
                     this.emitKeyEvent(src, 'mute', 'single');
+                    this.emitVolumeCommand(src, 'mute', false);
                 }
                 else if (arg === '40' || arg === '6c') {
                     // Remote power button intentionally ignored
@@ -486,14 +487,20 @@ class Pulse8CecClient extends node_events_1.EventEmitter {
             longFired: false,
             delayTimer: null,
             repeatTimer: null,
+            directDelayTimer: null,
+            directRepeatTimer: null,
             safetyTimer: null,
         };
+        // Always emit an immediate direct volume command on press
+        this.emitVolumeCommand(src, key, false);
         if (this.holdMode === 'repeat') {
             this.emitKeyEvent(src, key, 'single');
             hold.delayTimer = setTimeout(() => {
                 this.emitKeyEvent(src, key, 'single');
+                this.emitVolumeCommand(src, key, true);
                 hold.repeatTimer = setInterval(() => {
                     this.emitKeyEvent(src, key, 'single');
+                    this.emitVolumeCommand(src, key, true);
                 }, this.holdRepeatMs);
             }, this.holdDelayMs);
         }
@@ -501,6 +508,13 @@ class Pulse8CecClient extends node_events_1.EventEmitter {
             hold.delayTimer = setTimeout(() => {
                 hold.longFired = true;
                 this.emitKeyEvent(src, key, 'long');
+            }, this.holdDelayMs);
+            // Even when HomeKit buttons use longPress mode, direct Trinnov volume control smoothly steps while held
+            hold.directDelayTimer = setTimeout(() => {
+                this.emitVolumeCommand(src, key, true);
+                hold.directRepeatTimer = setInterval(() => {
+                    this.emitVolumeCommand(src, key, true);
+                }, this.holdRepeatMs);
             }, this.holdDelayMs);
         }
         hold.safetyTimer = setTimeout(() => {
@@ -531,6 +545,12 @@ class Pulse8CecClient extends node_events_1.EventEmitter {
         if (existing.repeatTimer) {
             clearInterval(existing.repeatTimer);
         }
+        if (existing.directDelayTimer) {
+            clearTimeout(existing.directDelayTimer);
+        }
+        if (existing.directRepeatTimer) {
+            clearInterval(existing.directRepeatTimer);
+        }
         if (existing.safetyTimer) {
             clearTimeout(existing.safetyTimer);
         }
@@ -550,6 +570,15 @@ class Pulse8CecClient extends node_events_1.EventEmitter {
         };
         this.log.info(`[CEC] Apple TV (${logicalAddress}) ${key} -> ${pressType.toUpperCase()}`);
         this.emit('keyPress', event);
+    }
+    emitVolumeCommand(logicalAddress, key, isRepeat) {
+        const event = {
+            logicalAddress,
+            key,
+            isRepeat,
+            timestamp: Date.now(),
+        };
+        this.emit('volumeCommand', event);
     }
 }
 exports.Pulse8CecClient = Pulse8CecClient;
