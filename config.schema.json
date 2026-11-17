@@ -58,6 +58,9 @@
         "type": "integer",
         "minimum": 1,
         "maximum": 15,
+        "x-schema-form": {
+          "type": "number"
+        },
         "description": "Optional HDMI port number (-p) if cec-client needs an explicit port for your receiver/switch."
       },
       "holdMode": {
@@ -82,6 +85,9 @@
         "default": 400,
         "minimum": 100,
         "maximum": 2000,
+        "x-schema-form": {
+          "type": "number"
+        },
         "description": "Milliseconds a volume button must be held before triggering Long Press or starting repeat ticks."
       },
       "holdRepeatMs": {
@@ -90,6 +96,9 @@
         "default": 150,
         "minimum": 50,
         "maximum": 1000,
+        "x-schema-form": {
+          "type": "number"
+        },
         "description": "Repeat interval in milliseconds while Volume Up or Volume Down is held."
       },
       "holdSafetyMs": {
@@ -98,6 +107,9 @@
         "default": 5000,
         "minimum": 1000,
         "maximum": 30000,
+        "x-schema-form": {
+          "type": "number"
+        },
         "description": "Maximum duration before automatically stopping a hold if a CEC release packet (0x45) is dropped."
       },
       "rescanIntervalSec": {
@@ -106,6 +118,9 @@
         "default": 0,
         "minimum": 0,
         "maximum": 3600,
+        "x-schema-form": {
+          "type": "number"
+        },
         "description": "Optional interval to periodically re-scan the HDMI-CEC bus for newly connected Apple TVs (0 = only scan on startup and unknown device traffic)."
       },
       "trinnovControl": {
@@ -140,6 +155,9 @@
         "default": 44100,
         "minimum": 1,
         "maximum": 65535,
+        "x-schema-form": {
+          "type": "number"
+        },
         "description": "Trinnov automation protocol TCP port (default: 44100)."
       },
       "trinnovVolumeStepDb": {
@@ -184,6 +202,9 @@
         "default": 60000,
         "minimum": 0,
         "maximum": 3600000,
+        "x-schema-form": {
+          "type": "number"
+        },
         "description": "Milliseconds of inactivity before sending 'bye' and closing the Trinnov TCP socket (0 = keep connected)."
       },
       "devices": {
@@ -250,7 +271,10 @@
               "title": "Trinnov Port Override (Optional)",
               "type": "integer",
               "minimum": 1,
-              "maximum": 65535
+              "maximum": 65535,
+              "x-schema-form": {
+                "type": "number"
+              }
             },
             "volumeStepDb": {
               "title": "Volume Step Override (dB)",
