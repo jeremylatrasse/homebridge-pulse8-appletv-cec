@@ -1,0 +1,56 @@
+{
+  "name": "homebridge-pulse8-appletv-cec",
+  "version": "1.0.0",
+  "description": "Homebridge dynamic platform plugin using a Pulse-Eight USB-CEC adapter (cec-client) to capture Apple TV Siri Remote HDMI-CEC button presses and expose them as native HomeKit programmable switches.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeremylatrasse/homebridge-pulse8-appletv-cec.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jeremylatrasse/homebridge-pulse8-appletv-cec/issues"
+  },
+  "homepage": "https://github.com/jeremylatrasse/homebridge-pulse8-appletv-cec#readme",
+  "keywords": [
+    "homebridge-plugin",
+    "apple-tv",
+    "appletv",
+    "pulse-eight",
+    "pulse8",
+    "hdmi-cec",
+    "cec",
+    "libcec",
+    "siri-remote",
+    "volume"
+  ],
+  "engines": {
+    "node": ">=18.0.0",
+    "homebridge": ">=1.6.0"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "config.schema.json",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "compile": "tsc",
+    "watch": "tsc --watch",
+    "prepublishOnly": "npm run compile",
+    "test": "npm run compile && node test-cec.mjs",
+    "bump": "npm version patch --no-git-tag-version"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.12.0",
+    "homebridge": "^1.8.0",
+    "typescript": "^5.4.0"
+  },
+  "allowScripts": {
+    "homebridge-pulse8-appletv-cec": true,
+    "fsevents": false,
+    "unrs-resolver": false
+  }
+}

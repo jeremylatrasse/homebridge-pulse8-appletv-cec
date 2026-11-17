@@ -1,0 +1,159 @@
+{
+  "pluginAlias": "Pulse8AppleTvCec",
+  "pluginType": "platform",
+  "singular": true,
+  "headerDisplay": "Pulse-Eight USB-CEC Apple TV Remote Bridge for Homebridge",
+  "footerDisplay": "Captures Apple TV Siri Remote HDMI-CEC Volume Up, Volume Down, and Mute presses via cec-client (libcec) and exposes them as native HomeKit StatelessProgrammableSwitch buttons so you can automate any Homebridge device.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Platform Name",
+        "type": "string",
+        "default": "Pulse-Eight Apple TV CEC",
+        "description": "The name for this platform instance in Homebridge."
+      },
+      "platform": {
+        "title": "Platform Identifier",
+        "type": "string",
+        "default": "Pulse8AppleTvCec"
+      },
+      "_bridge": {
+        "type": "object",
+        "title": "Child Bridge",
+        "description": "Optional Homebridge Child Bridge settings (managed via Bridge Settings in Homebridge UI).",
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "cecClientPath": {
+        "title": "cec-client Executable Path",
+        "type": "string",
+        "default": "cec-client",
+        "description": "Path to the libcec cec-client binary (e.g. 'cec-client', '/opt/homebrew/bin/cec-client', or '/usr/bin/cec-client')."
+      },
+      "portPath": {
+        "title": "Pulse-Eight Serial Port (Optional)",
+        "type": "string",
+        "placeholder": "/dev/cu.usbmodemv121 or /dev/ttyACM0",
+        "description": "Leave blank to let cec-client auto-detect the Pulse-Eight adapter, or specify an explicit serial device path."
+      },
+      "osdName": {
+        "title": "CEC OSD Name",
+        "type": "string",
+        "default": "Homebridge",
+        "maxLength": 14,
+        "description": "Device name advertised on the HDMI-CEC bus (up to 14 characters)."
+      },
+      "hdmiPort": {
+        "title": "HDMI Port Number (Optional)",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 15,
+        "description": "Optional HDMI port number (-p) if cec-client needs an explicit port for your receiver/switch."
+      },
+      "holdMode": {
+        "title": "Volume Hold Behavior",
+        "type": "string",
+        "default": "longPress",
+        "oneOf": [
+          {
+            "title": "Single Press (<400ms) / Long Press (>=400ms) (Recommended)",
+            "enum": ["longPress"]
+          },
+          {
+            "title": "Continuous Repeat (Emit Single Press every 150ms while held)",
+            "enum": ["repeat"]
+          }
+        ],
+        "description": "How holding Volume Up or Volume Down on the Siri Remote maps to HomeKit StatelessProgrammableSwitch events."
+      },
+      "holdDelayMs": {
+        "title": "Hold Threshold Delay (ms)",
+        "type": "integer",
+        "default": 400,
+        "minimum": 100,
+        "maximum": 2000,
+        "description": "Milliseconds a volume button must be held before triggering Long Press or starting repeat ticks."
+      },
+      "holdRepeatMs": {
+        "title": "Hold Repeat Interval (ms)",
+        "type": "integer",
+        "default": 150,
+        "minimum": 50,
+        "maximum": 1000,
+        "description": "Repeat interval in milliseconds when Volume Hold Behavior is set to Continuous Repeat."
+      },
+      "holdSafetyMs": {
+        "title": "Hold Safety Timeout (ms)",
+        "type": "integer",
+        "default": 5000,
+        "minimum": 1000,
+        "maximum": 30000,
+        "description": "Maximum duration before automatically stopping a hold if a CEC release packet (0x45) is dropped."
+      },
+      "rescanIntervalSec": {
+        "title": "Periodic CEC Bus Rescan Interval (seconds)",
+        "type": "integer",
+        "default": 0,
+        "minimum": 0,
+        "maximum": 3600,
+        "description": "Optional interval to periodically re-scan the HDMI-CEC bus for newly connected Apple TVs (0 = only scan on startup and unknown device traffic)."
+      },
+      "devices": {
+        "title": "Apple TV Filters & Overrides (Optional)",
+        "type": "array",
+        "description": "By default, all Apple TVs found by 'cec-client scan' are exposed automatically. Add entries here only if you want to filter specific Apple TVs or customize their HomeKit names.",
+        "items": {
+          "title": "Apple TV Filter / Override",
+          "type": "object",
+          "properties": {
+            "name": {
+              "title": "Custom HomeKit Accessory Name",
+              "type": "string",
+              "placeholder": "Theater Apple TV"
+            },
+            "id": {
+              "title": "Unique Identifier (Optional)",
+              "type": "string",
+              "placeholder": "theater-appletv"
+            },
+            "logicalAddress": {
+              "title": "CEC Logical Address (Hex)",
+              "type": "string",
+              "placeholder": "4",
+              "pattern": "^[0-9a-fA-F]$",
+              "description": "Match discovered Apple TV by CEC logical address nibble (e.g. '4' for Playback 1, '8' for Playback 2, 'b' for Playback 3)."
+            },
+            "physicalAddress": {
+              "title": "CEC Physical Address",
+              "type": "string",
+              "placeholder": "6.0.0.0",
+              "description": "Match discovered Apple TV by HDMI physical address (e.g. '6.0.0.0')."
+            },
+            "osdName": {
+              "title": "Discovered CEC OSD Name",
+              "type": "string",
+              "placeholder": "Apple TV",
+              "description": "Match discovered Apple TV by its CEC OSD string."
+            },
+            "enabled": {
+              "title": "Enabled",
+              "type": "boolean",
+              "default": true,
+              "description": "Set to false to ignore this Apple TV."
+            }
+          }
+        }
+      }
+    }
+  }
+}

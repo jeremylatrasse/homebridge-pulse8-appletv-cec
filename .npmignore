@@ -1,0 +1,10 @@
+src/
+homebridge-pulse8-appletv-cec/
+homebridge-pulse8-appletv-cec.xcodeproj/
+.github/
+.vscode/
+.idea/
+tsconfig.json
+test-cec.mjs
+SPEC.md
+.DS_Store
