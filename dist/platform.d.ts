@@ -1,6 +1,28 @@
 import { API, DynamicPlatformPlugin, Logger, PlatformAccessory, PlatformConfig, Service, Characteristic } from 'homebridge';
-import { CecDiscoveredDevice } from './cecClient';
-import { AppleTvFilterConfig } from './platformAccessory';
+import { CecDiscoveredDevice, CecPowerKeyMode } from './cecClient';
+import { AppleTvFilterConfig, PowerSensorType } from './platformAccessory';
+import { HttpEndpointsConfig, TargetMode, TargetMuteAction, TcpCommandTemplates } from './targetDriver';
+export type TargetPowerMode = 'none' | 'keysOnly' | 'all';
+export interface NormalizedPlatformConfig {
+    targetMode: TargetMode;
+    targetHost?: string;
+    targetPort?: number;
+    targetVolumeStepDb?: number;
+    targetMuteAction: TargetMuteAction;
+    targetPowerMode: TargetPowerMode;
+    targetDiscoveryUrl?: string;
+    targetClientId?: string;
+    targetIdleTimeoutMs?: number;
+    targetAutodetectPlugins?: string[];
+    tcpCommands?: TcpCommandTemplates;
+    httpEndpoints?: HttpEndpointsConfig;
+    powerSensorType: PowerSensorType;
+    includePowerButtons: boolean;
+    powerDebounceMs?: number;
+    ignoreStandbyAfterWakeMs?: number;
+    powerKeyMode: CecPowerKeyMode;
+}
+export declare function normalizePlatformConfig(config: PlatformConfig): NormalizedPlatformConfig;
 export declare function matchesAppleTvFilter(device: CecDiscoveredDevice, filter: AppleTvFilterConfig): boolean;
 export declare class Pulse8AppleTvCecPlatform implements DynamicPlatformPlugin {
     readonly log: Logger;
@@ -12,15 +34,17 @@ export declare class Pulse8AppleTvCecPlatform implements DynamicPlatformPlugin {
     private readonly activeByLogicalAddress;
     private readonly pluginVersion;
     private cecClient;
-    private trinnovResolver;
-    private trinnovPool;
-    private trinnovMuteAction;
+    private targetResolver;
+    private driverPool;
+    private normalizedConfig;
     private registeredPlatformName;
     constructor(log: Logger, config: PlatformConfig, api: API);
     configureAccessory(accessory: PlatformAccessory): void;
     private getConfiguredDeviceFilters;
+    private createAccessoryHandler;
     private startCecBridge;
     private findEntryForLogicalAddress;
-    private handleVolumeCommand;
+    private handleSemanticAction;
+    private dispatchTargetAction;
     private reconcileDiscoveredAppleTvs;
 }

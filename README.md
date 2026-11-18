@@ -1,25 +1,32 @@
 # homebridge-pulse8-appletv-cec
 
-A Homebridge dynamic platform plugin that uses a **Pulse-Eight USB-CEC Adapter** (`cec-client` / `libcec`) to capture Apple TV Siri Remote HDMI-CEC button presses (**Volume Up**, **Volume Down**, **Mute**) and expose them as native HomeKit `StatelessProgrammableSwitch` buttons—with built-in **direct Trinnov TCP port `44100` volume/mute control** and automatic `homebridge-trinnov` discovery.
+A Homebridge dynamic platform plugin that uses a **Pulse-Eight USB-CEC Adapter** (`cec-client` / `libcec`) to capture Apple TV Siri Remote HDMI-CEC button presses (**Volume Up**, **Volume Down**, **Mute**, and optional **Power**) and Apple TV wake/standby bus state—exposing native HomeKit services and optionally dispatching commands directly to **any AVR, AV processor, or HTTP webhook** (with zero-config `homebridge-trinnov` and Homebridge `config.json` auto-discovery).
 
-This lets Homebridge users whose amplifiers, AV processors, soundbars, or projectors do **not** implement HDMI-CEC either trigger any HomeKit automation or send low-latency `dvolume` / `mute` commands directly to a Trinnov processor from their Apple TV remote.
+This lets Homebridge users whose amplifiers, AV processors, soundbars, or projectors do **not** implement HDMI-CEC trigger any HomeKit automation or send low-latency volume, mute, and power commands straight from their Apple TV remote.
 
 ---
 
 ## Features
 
-- **Direct Trinnov Control (TCP `44100`):** Sends `dvolume <step>` and `mute 2` commands directly to your Trinnov Altitude / Optimizer over TCP port `44100` with persistent warm connections, `id` handshake, clean `bye` idle disconnect, and zero-latency hold ramping.
-- **Automatic `homebridge-trinnov` Discovery (Same Process & Child Bridges):** Discovers your Trinnov IP/port automatically via:
-  1. Per-Apple TV or platform-level config overrides (`trinnovHost`, `trinnovId`, `trinnovPort`),
-  2. Live discovery from `homebridge-trinnov` via `<storagePath>/homebridge-trinnov-discovery.json` and/or HTTP (`GET /api/cec/targets`),
-  3. Automatic fallback inspection of Homebridge's `config.json` for any configured `homebridge-trinnov` plugin.
-- **Native HomeKit Programmable Switches:** Exposes **Volume Up**, **Volume Down**, and **Mute** as `StatelessProgrammableSwitch` buttons in Apple Home—compatible with every other Homebridge plugin via standard HomeKit automations.
+- **Native HomeKit Programmable Switches (Always Active):** Exposes **Volume Up**, **Volume Down**, and **Mute** (plus optional **Power On** / **Power Off**) as `StatelessProgrammableSwitch` buttons in Apple Home—compatible with every Homebridge plugin via standard HomeKit automations.
+- **Optional Apple TV Power / Activity Sensor:** Optionally expose a debounced `OccupancySensor` or `Switch` per Apple TV driven by HDMI-CEC `Active Source` (`0x82`) / `Image View On` (`0x04`) and `Standby` (`0x36`).
+- **Pluggable Action Target Drivers (`targetMode`):**
+  - **`auto` (Default):** Automatically discovers targets from Homebridge discovery files, HTTP discovery endpoints, or Homebridge's `config.json` (falling back cleanly to HomeKit-only mode if none are present).
+  - **`trinnov`:** Direct Trinnov TCP `44100` preset (`id` handshake, `dvolume`, `mute 2`, `bye`).
+  - **`tcp`:** Generic persistent TCP/Telnet driver with customizable `init`, `volumeUp`, `volumeDown`, `mute`, `powerOn`, `powerOff`, `powerToggle`, and `bye` templates (supports `{{stepDb}}`, `{{-stepDb}}`, `{{clientId}}`, `{{source}}`, escaped `\r`/`\n`, and `hex:...` binary payloads).
+  - **`http`:** Generic HTTP webhook / REST API driver (`GET`/`POST`/`PUT`/`PATCH`/`DELETE`, custom headers, JSON/text templates).
+  - **`disabled`:** HomeKit accessories only.
+- **Automatic Homebridge Target Discovery:**
+  1. `<storagePath>/homebridge-cec-targets.json` (v1 generic multi-plugin discovery file)
+  2. `<storagePath>/homebridge-*-discovery.json` (wildcard scan, including `homebridge-trinnov-discovery.json`)
+  3. Optional HTTP discovery endpoint (`GET /api/cec/targets`)
+  4. Automatic fallback scan of Homebridge's `config.json` for built-in AVR/processor presets (**Trinnov**, **Anthem**, **Denon/Marantz**, **Pioneer**, **StormAudio**, **Lyngdorf**, **Yamaha**), common AV/TV plugin keywords, explicit `cecTarget` / `tcpCommands` / `httpEndpoints` fields, or user-defined `targetAutodetectPlugins`.
 - **Tap & Hold Ramping Support:**
   - **HomeKit Switches (`longPress` default):** Short tap emits `Single Press`; holding past `400ms` emits `Long Press` once (or set `holdMode` to `repeat` for repeated `Single Press` ticks).
-  - **Direct Trinnov TCP Control:** Always emits an immediate step on press and continuously repeats every `150ms` while held until release (`0x45`) or `5s` safety timeout.
-- **Dynamic Apple TV Discovery (`scan`):** Runs `cec-client` `scan` automatically on startup rather than hardcoding Logical Address `4`. If multiple Apple TVs are present on the HDMI bus, each discovered Apple TV gets its own HomeKit accessory (unless filtered in `config.json`).
+  - **Direct Targets (TCP / HTTP):** Always emits an immediate step on press and continuously repeats every `150ms` while held until release (`0x45`) or `5s` safety timeout.
+- **Dynamic Apple TV Discovery (`scan`):** Runs `cec-client` `scan` automatically on startup rather than hardcoding Logical Address `4`. Each discovered Apple TV gets its own HomeKit accessory (unless filtered in `config.json`).
 - **System Audio Mode Persistence:** Emulates a CEC Audio System (`-t a`, Logical Address `5`) and replies to tvOS status/power polls (`tx 5F:72:01`, `tx 5<src>:7a:32`, `tx 5<src>:90:00`) so the Siri Remote stays locked in HDMI-CEC volume mode across wakes.
-- **Clean Shutdown & Auto-Respawn:** Gracefully terminates `cec-client` and closes Trinnov sockets (`bye`) on Homebridge `shutdown`.
+- **Clean Shutdown & Auto-Respawn:** Gracefully terminates `cec-client` and closes active target sockets (`bye`) on Homebridge `shutdown`.
 
 ---
 
@@ -49,28 +56,67 @@ On each Apple TV you want to capture:
 
 ---
 
-## `homebridge-trinnov` Discovery & HTTP Contract
+## Configuration Examples
 
-To let `homebridge-pulse8-appletv-cec` discover Trinnov processors dynamically across both **same-process** and **Homebridge Child Bridge** setups:
+### HomeKit-Only Automations (No External IP Target)
+```json
+{
+  "platform": "Pulse8AppleTvCec",
+  "targetMode": "disabled",
+  "powerSensorType": "occupancy"
+}
+```
 
-### 1. Shared Discovery File (Recommended for Same Host / Child Bridges)
+### Generic TCP AVR (e.g., Anthem AVM / MRX)
+```json
+{
+  "platform": "Pulse8AppleTvCec",
+  "targetMode": "tcp",
+  "targetHost": "192.168.1.60",
+  "targetPort": 14999,
+  "tcpCommands": {
+    "volumeUp": "Z1VUP;",
+    "volumeDown": "Z1VDN;",
+    "mute": "Z1MUT;",
+    "lineEnding": "\\n"
+  }
+}
+```
 
-`homebridge-trinnov` writes (atomically via temp file + rename) `<api.user.storagePath()>/homebridge-trinnov-discovery.json`:
+### HTTP Webhook / REST API (e.g., Home Assistant)
+```json
+{
+  "platform": "Pulse8AppleTvCec",
+  "targetMode": "http",
+  "httpEndpoints": {
+    "volumeUp": "http://192.168.1.10:8123/api/webhook/atv_vol_up",
+    "volumeDown": "http://192.168.1.10:8123/api/webhook/atv_vol_down",
+    "mute": "http://192.168.1.10:8123/api/webhook/atv_mute"
+  }
+}
+```
+
+---
+
+## Cross-Plugin Discovery Contract (`v1`)
+
+Other Homebridge plugins (such as `homebridge-trinnov`) can publish targets automatically for both **same-process** and **Child Bridge** setups via `<api.user.storagePath()>/homebridge-cec-targets.json` or `<storagePath>/homebridge-*-discovery.json` (and optionally `GET /api/cec/targets`):
 
 ```json
 {
   "version": 1,
   "plugin": "homebridge-trinnov",
-  "updatedAt": "2026-11-16T20:51:27.000Z",
+  "updatedAt": "2026-11-18T15:00:00.000Z",
   "pid": 12345,
   "http": {
     "baseUrl": "http://127.0.0.1:44180",
     "targetsPath": "/api/cec/targets"
   },
-  "processors": [
+  "targets": [
     {
       "id": "theater-trinnov",
       "name": "Theater Altitude 32",
+      "driver": "trinnov",
       "host": "192.168.1.50",
       "port": 44100,
       "powered": true,
@@ -80,34 +126,19 @@ To let `homebridge-pulse8-appletv-cec` discover Trinnov processors dynamically a
   ]
 }
 ```
-
-### 2. Optional HTTP Discovery Endpoint (Cross-Container / LAN)
-
-If `homebridge-trinnov` binds a local HTTP server (e.g. `http://127.0.0.1:44180`), `GET /api/cec/targets` returns the exact same JSON schema (`200 OK`, `application/json`). Configure `trinnovDiscoveryUrl` in `homebridge-pulse8-appletv-cec` if `homebridge-trinnov` runs in a separate container/host without shared `storagePath`.
+*(Legacy `"processors"` arrays from `homebridge-trinnov-discovery.json` are also supported.)*
 
 ### Target Resolution Priority (Per Apple TV)
 
-1. `devices[].trinnovEnabled === false` or `trinnovControl === "disabled"` → Do not send to Trinnov.
-2. `devices[].trinnovHost` → Explicit host override for that Apple TV.
-3. `devices[].trinnovId` → Match discovered processor by `id` or `name`.
-4. `trinnovHost` → Global platform override.
-5. Auto-discovered processors (`HTTP discovery` → `homebridge-trinnov-discovery.json` → Homebridge `config.json` fallback): matches `activeSource` against the Apple TV name if multiple processors exist, then `powered === true`, then first processor.
+1. `devices[].targetEnabled === false` (or legacy `trinnovEnabled === false`) or `targetMode === "disabled"` → Do not send to external target.
+2. `devices[].targetHost` (or `trinnovHost`) / `devices[].httpEndpoints` → Explicit per-Apple TV override.
+3. `devices[].targetId` (or `trinnovId`) → Match discovered target by `id` or `name`.
+4. `targetHost` (or `trinnovHost`) / `httpEndpoints` → Global platform override.
+5. Auto-discovered targets (`HTTP discovery` → discovery files → Homebridge `config.json`): matches `activeSource` against the Apple TV name, then `powered === true`, then actionable preset targets first.
 
 ---
 
-## HomeKit Automation Setup
-
-1. Restart Homebridge after configuring the plugin.
-2. Open the **Apple Home** app and locate your Apple TV CEC accessory (e.g. **Apple TV**).
-3. You will see three programmable buttons:
-   - **Volume Up** (`Single Press`, `Long Press`)
-   - **Volume Down** (`Single Press`, `Long Press`)
-   - **Mute** (`Single Press`)
-4. Assign any HomeKit Scene or Automation if desired (or rely on automatic direct Trinnov TCP `44100` control).
-
----
-
-## Configuration
+## Configuration Reference
 
 | Option | Default | Description |
 | :--- | :--- | :--- |
@@ -120,15 +151,24 @@ If `homebridge-trinnov` binds a local HTTP server (e.g. `http://127.0.0.1:44180`
 | `holdRepeatMs` | `150` | Repeat interval in milliseconds while Volume Up/Down is held. |
 | `holdSafetyMs` | `5000` | Safety timeout in milliseconds in case a CEC release (`0x45`) frame is dropped. |
 | `rescanIntervalSec` | `0` | Optional periodic bus rescan interval in seconds (`0` = startup & unknown traffic only). |
-| `trinnovControl` | `auto` | `auto` (send to Trinnov TCP `44100` if discovered/configured), `enabled`, or `disabled`. |
-| `trinnovHost` | *(auto-discover)* | Optional manual Trinnov IP/hostname override. |
-| `trinnovPort` | `44100` | Trinnov automation protocol TCP port. |
-| `trinnovVolumeStepDb` | `1` | Volume step in dB sent via `dvolume` on each press/repeat tick (e.g. `0.5` or `1`). |
-| `trinnovMuteAction` | `toggle` | `toggle` (`mute 2`) or `ignore`. |
-| `trinnovDiscoveryUrl` | *(unset)* | Optional `homebridge-trinnov` HTTP discovery URL (`GET /api/cec/targets`). |
-| `trinnovClientId` | `homebridge-pulse8-appletv-cec` | Identifier sent in the Trinnov `id` handshake. |
-| `trinnovIdleTimeoutMs` | `60000` | Idle disconnect timeout in ms before sending `bye` (`0` = keep open). |
-| `devices` | `[]` | Optional filter/override list to rename, select, disable, or bind specific Apple TVs to specific Trinnov targets. |
+| `powerSensorType` | `none` | Optional Apple TV power service: `none`, `occupancy`, or `switch`. |
+| `includePowerButtons` | `false` | Optionally expose stateless `Power On` and `Power Off` buttons in HomeKit. |
+| `powerKeyMode` | `ignore` | `ignore` or `handle` CEC remote power keys (`44:40`, `44:6b`, `44:6c`, `44:6d`). |
+| `powerDebounceMs` | `1500` | Debounce settle window in ms against rapid CEC power flicker. |
+| `ignoreStandbyAfterWakeMs` | `0` | Optional guard window in ms to ignore spurious `0x36` Standby right after wake (`0` = disabled). |
+| `targetMode` | `auto` | `auto`, `trinnov`, `tcp`, `http`, or `disabled` (legacy alias: `trinnovControl`). |
+| `targetHost` | *(auto-discover)* | Optional manual target IP/hostname override (legacy alias: `trinnovHost`). |
+| `targetPort` | *(driver default)* | Target TCP/HTTP port (`44100` for Trinnov, `23` for TCP, `80` for HTTP; legacy alias: `trinnovPort`). |
+| `targetVolumeStepDb` | `1` | Volume step value interpolated as `{{stepDb}}` (legacy alias: `trinnovVolumeStepDb`). |
+| `targetMuteAction` | `toggle` | `toggle` or `ignore` (legacy alias: `trinnovMuteAction`). |
+| `targetPowerMode` | `keysOnly` | `keysOnly`, `all` (bus wake/standby + remote keys), or `none`. |
+| `targetDiscoveryUrl` | *(unset)* | Optional HTTP discovery URL (`GET /api/cec/targets`; legacy alias: `trinnovDiscoveryUrl`). |
+| `targetClientId` | `homebridge-pulse8-appletv-cec` | Client identifier interpolated as `{{clientId}}` during TCP init (legacy alias: `trinnovClientId`). |
+| `targetIdleTimeoutMs` | `60000` | Idle TCP disconnect timeout in ms (`0` = keep open; legacy alias: `trinnovIdleTimeoutMs`). |
+| `targetAutodetectPlugins` | `[]` | Additional Homebridge platform/accessory names to scan in `config.json`. |
+| `tcpCommands` | *(preset)* | Custom command templates for `tcp` targets (`init`, `volumeUp`, `volumeDown`, `mute`, `powerOn`, `powerOff`, `powerToggle`, `bye`, `lineEnding`). |
+| `httpEndpoints` | *(unset)* | Custom URL / `{ url, method, headers, body }` definitions for `http` targets. |
+| `devices` | `[]` | Optional filter/override list to rename, select, disable, or bind specific Apple TVs to specific targets. |
 
 ---
 

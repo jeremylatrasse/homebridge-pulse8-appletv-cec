@@ -1,7 +1,9 @@
 import { EventEmitter } from 'node:events';
 export type CecHoldMode = 'longPress' | 'repeat';
-export type CecKeyType = 'volumeUp' | 'volumeDown' | 'mute';
+export type CecKeyType = 'volumeUp' | 'volumeDown' | 'mute' | 'powerOn' | 'powerOff';
 export type CecPressType = 'single' | 'long';
+export type CecPowerKeyMode = 'ignore' | 'handle';
+export type CecSemanticAction = 'volumeUp' | 'volumeDown' | 'muteToggle' | 'powerOn' | 'powerOff' | 'powerToggle';
 export interface CecLogger {
     info(message: string, ...parameters: unknown[]): void;
     warn(message: string, ...parameters: unknown[]): void;
@@ -26,8 +28,22 @@ export interface CecKeyEvent {
 }
 export interface CecVolumeCommandEvent {
     logicalAddress: string;
-    key: CecKeyType;
+    key: 'volumeUp' | 'volumeDown' | 'mute';
     isRepeat: boolean;
+    timestamp: number;
+}
+export interface CecPowerChangeEvent {
+    logicalAddress: string;
+    powered: boolean;
+    previous: boolean | null;
+    source: 'bus' | 'key';
+    timestamp: number;
+}
+export interface CecActionEvent {
+    logicalAddress: string;
+    action: CecSemanticAction;
+    isRepeat: boolean;
+    source: 'key' | 'bus';
     timestamp: number;
 }
 export interface CecTrafficFrame {
@@ -47,6 +63,8 @@ export interface CecClientOptions {
     holdRepeatMs?: number;
     holdSafetyMs?: number;
     powerDebounceMs?: number;
+    ignoreStandbyAfterWakeMs?: number;
+    powerKeyMode?: CecPowerKeyMode;
     rescanIntervalSec?: number;
     rawSender?: (cmd: string) => void;
 }
@@ -81,6 +99,8 @@ export declare class Pulse8CecClient extends EventEmitter {
     private readonly holdRepeatMs;
     private readonly holdSafetyMs;
     private readonly powerDebounceMs;
+    private readonly ignoreStandbyAfterWakeMs;
+    private readonly powerKeyMode;
     private readonly rescanIntervalSec;
     private readonly rawSender?;
     private proc;
@@ -99,6 +119,8 @@ export declare class Pulse8CecClient extends EventEmitter {
     private readonly discoveredAppleTvs;
     private readonly powerStates;
     private readonly lastPowerTransitionAt;
+    private readonly lastWakeAt;
+    private readonly pendingPowerTimers;
     private readonly holds;
     constructor(options: CecClientOptions, log: CecLogger);
     start(): void;
@@ -115,11 +137,16 @@ export declare class Pulse8CecClient extends EventEmitter {
     private clearScanTimers;
     private isAllowedInitiator;
     private handleTrafficFrame;
-    private recordBusPowerState;
+    private handleRemotePowerKey;
+    private recordPowerState;
+    private applyPowerTransition;
+    private clearPendingPowerTimer;
+    private clearAllPendingPowerTimers;
     private handleVolumeKeyPress;
     private handleVolumeKeyRelease;
     private stopHold;
     private stopAllHolds;
     private emitKeyEvent;
     private emitVolumeCommand;
+    private emitAction;
 }

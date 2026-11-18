@@ -1,10 +1,11 @@
 import * as net from 'node:net';
 import { CecLogger } from './cecClient';
-export declare const TRINNOV_DEFAULT_PORT = 44100;
-export declare const TRINNOV_DISCOVERY_FILENAME = "homebridge-trinnov-discovery.json";
+import { AppleTvTargetOverride, TargetSource, TRINNOV_DISCOVERY_FILENAME } from './targetDiscovery';
+import { TRINNOV_DEFAULT_PORT } from './targetDriver';
+export { TRINNOV_DEFAULT_PORT, TRINNOV_DISCOVERY_FILENAME };
 export type TrinnovControlMode = 'auto' | 'enabled' | 'disabled';
 export type TrinnovMuteAction = 'toggle' | 'ignore';
-export type TrinnovTargetSource = 'deviceConfig' | 'platformConfig' | 'discoveryHttp' | 'discoveryFile' | 'homebridgeConfig';
+export type TrinnovTargetSource = TargetSource;
 export interface TrinnovProcessorTarget {
     id?: string;
     name?: string;
@@ -16,45 +17,7 @@ export interface TrinnovProcessorTarget {
     httpEndpoint?: string;
     source: TrinnovTargetSource;
 }
-export interface TrinnovDiscoveryProcessorEntry {
-    id?: string;
-    name?: string;
-    host?: string;
-    ip?: string;
-    ipAddress?: string;
-    address?: string;
-    port?: number;
-    powered?: boolean;
-    activeSource?: string;
-    volumeStepDb?: number;
-    httpEndpoint?: string;
-    enabled?: boolean;
-}
-export interface TrinnovDiscoveryPayload {
-    version?: number;
-    plugin?: string;
-    updatedAt?: string;
-    pid?: number;
-    http?: {
-        baseUrl?: string;
-        targetsPath?: string;
-    };
-    processors?: TrinnovDiscoveryProcessorEntry[];
-    id?: string;
-    name?: string;
-    host?: string;
-    ip?: string;
-    port?: number;
-    powered?: boolean;
-    activeSource?: string;
-    volumeStepDb?: number;
-}
-export interface AppleTvTrinnovOverride {
-    trinnovEnabled?: boolean;
-    trinnovId?: string;
-    trinnovHost?: string;
-    trinnovPort?: number;
-    volumeStepDb?: number;
+export interface AppleTvTrinnovOverride extends AppleTvTargetOverride {
 }
 export interface TrinnovTargetResolverOptions {
     mode?: TrinnovControlMode;
@@ -76,25 +39,7 @@ export declare function parseTrinnovDiscoveryPayload(raw: unknown, source: 'disc
 };
 export declare function extractTrinnovTargetsFromHomebridgeConfig(rawConfig: unknown): TrinnovProcessorTarget[];
 export declare class TrinnovTargetResolver {
-    private readonly log;
-    private readonly mode;
-    private readonly platformHost?;
-    private readonly platformPort;
-    private readonly defaultStepDb;
-    private readonly configuredDiscoveryUrl?;
-    private readonly discoveryFilePath?;
-    private readonly configPath?;
-    private readonly httpFetcher;
-    private fileTargets;
-    private httpTargets;
-    private configTargets;
-    private discoveredHttpUrl?;
-    private lastDiskCheckAt;
-    private lastDiscoveryFileMtimeMs;
-    private lastHttpFetchAt;
-    private httpFetchInFlight;
-    private refreshTimer;
-    private lastLoggedTargetKey;
+    private readonly inner;
     constructor(options: TrinnovTargetResolverOptions, log: CecLogger);
     start(): void;
     stop(): void;
@@ -106,11 +51,6 @@ export declare class TrinnovTargetResolver {
         deviceOverride?: AppleTvTrinnovOverride;
     }): ResolvedTrinnovTarget | null;
     getCandidateList(): TrinnovProcessorTarget[];
-    private selectBestCandidate;
-    private logResolvedOnce;
-    private maybeReloadDiscoveryFile;
-    private loadDiscoveryFile;
-    private loadHomebridgeConfig;
 }
 export interface TrinnovTcpClientOptions {
     host: string;
@@ -121,46 +61,17 @@ export interface TrinnovTcpClientOptions {
     socketFactory?: (port: number, host: string) => net.Socket;
 }
 export declare class TrinnovTcpClient {
-    private readonly log;
     readonly host: string;
     readonly port: number;
-    private readonly clientId;
-    private readonly idleTimeoutMs;
-    private readonly connectTimeoutMs;
-    private readonly socketFactory;
-    private socket;
-    private state;
-    private isStopped;
-    private readBuffer;
-    private idSent;
-    private pendingCommands;
-    private connectTimer;
-    private welcomeFallbackTimer;
-    private handshakeTimer;
-    private idleTimer;
-    private lastWarnAt;
+    private readonly driver;
     constructor(options: TrinnovTcpClientOptions, log: CecLogger);
     adjustVolume(deltaDb: number): void;
     toggleMute(): void;
     sendCommand(command: string): void;
     stop(): void;
-    private connect;
-    private handleData;
-    private handleLine;
-    private sendHandshakeId;
-    private flushPendingCommands;
-    private writeLine;
-    private resetIdleTimer;
-    private handleFailure;
-    private cleanupSocket;
-    private clearConnectTimer;
-    private clearHandshakeTimers;
-    private clearAllTimers;
 }
 export declare class TrinnovClientPool {
-    private readonly options;
-    private readonly log;
-    private readonly clients;
+    private readonly pool;
     constructor(options: {
         clientId?: string;
         idleTimeoutMs?: number;
@@ -170,5 +81,4 @@ export declare class TrinnovClientPool {
     adjustVolume(target: TrinnovProcessorTarget, deltaDb: number): void;
     toggleMute(target: TrinnovProcessorTarget): void;
     stopAll(): void;
-    private getClient;
 }

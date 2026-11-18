@@ -5,8 +5,16 @@ import { delimiter, join } from 'node:path';
 import * as readline from 'node:readline';
 
 export type CecHoldMode = 'longPress' | 'repeat';
-export type CecKeyType = 'volumeUp' | 'volumeDown' | 'mute';
+export type CecKeyType = 'volumeUp' | 'volumeDown' | 'mute' | 'powerOn' | 'powerOff';
 export type CecPressType = 'single' | 'long';
+export type CecPowerKeyMode = 'ignore' | 'handle';
+export type CecSemanticAction =
+  | 'volumeUp'
+  | 'volumeDown'
+  | 'muteToggle'
+  | 'powerOn'
+  | 'powerOff'
+  | 'powerToggle';
 
 export interface CecLogger {
   info(message: string, ...parameters: unknown[]): void;
@@ -35,8 +43,24 @@ export interface CecKeyEvent {
 
 export interface CecVolumeCommandEvent {
   logicalAddress: string;
-  key: CecKeyType;
+  key: 'volumeUp' | 'volumeDown' | 'mute';
   isRepeat: boolean;
+  timestamp: number;
+}
+
+export interface CecPowerChangeEvent {
+  logicalAddress: string;
+  powered: boolean;
+  previous: boolean | null;
+  source: 'bus' | 'key';
+  timestamp: number;
+}
+
+export interface CecActionEvent {
+  logicalAddress: string;
+  action: CecSemanticAction;
+  isRepeat: boolean;
+  source: 'key' | 'bus';
   timestamp: number;
 }
 
@@ -58,6 +82,8 @@ export interface CecClientOptions {
   holdRepeatMs?: number;
   holdSafetyMs?: number;
   powerDebounceMs?: number;
+  ignoreStandbyAfterWakeMs?: number;
+  powerKeyMode?: CecPowerKeyMode;
   rescanIntervalSec?: number;
   rawSender?: (cmd: string) => void;
 }
@@ -77,6 +103,12 @@ interface HoldState {
   directDelayTimer: NodeJS.Timeout | null;
   directRepeatTimer: NodeJS.Timeout | null;
   safetyTimer: NodeJS.Timeout | null;
+}
+
+interface PendingPowerTransition {
+  targetState: boolean;
+  source: 'bus' | 'key';
+  timer: NodeJS.Timeout;
 }
 
 const PLAYBACK_LOGICAL_ADDRESSES = new Set(['3', '4', '6', '8', 'b']);
@@ -281,6 +313,8 @@ export class Pulse8CecClient extends EventEmitter {
   private readonly holdRepeatMs: number;
   private readonly holdSafetyMs: number;
   private readonly powerDebounceMs: number;
+  private readonly ignoreStandbyAfterWakeMs: number;
+  private readonly powerKeyMode: CecPowerKeyMode;
   private readonly rescanIntervalSec: number;
   private readonly rawSender?: (cmd: string) => void;
 
@@ -304,6 +338,8 @@ export class Pulse8CecClient extends EventEmitter {
   // Internal bus power tracking starting at null (unknown) so Standby works even if Apple TV was already awake at boot
   private readonly powerStates = new Map<string, boolean | null>();
   private readonly lastPowerTransitionAt = new Map<string, number>();
+  private readonly lastWakeAt = new Map<string, number>();
+  private readonly pendingPowerTimers = new Map<string, PendingPowerTransition>();
   // Active hold state per initiator logical address
   private readonly holds = new Map<string, HoldState>();
 
@@ -323,7 +359,9 @@ export class Pulse8CecClient extends EventEmitter {
     this.holdDelayMs = options.holdDelayMs ?? 400;
     this.holdRepeatMs = options.holdRepeatMs ?? 150;
     this.holdSafetyMs = options.holdSafetyMs ?? 5000;
-    this.powerDebounceMs = options.powerDebounceMs ?? 1500;
+    this.powerDebounceMs = Math.max(0, options.powerDebounceMs ?? 1500);
+    this.ignoreStandbyAfterWakeMs = Math.max(0, options.ignoreStandbyAfterWakeMs ?? 0);
+    this.powerKeyMode = options.powerKeyMode === 'handle' ? 'handle' : 'ignore';
     this.rescanIntervalSec = options.rescanIntervalSec ?? 0;
     this.rawSender = options.rawSender;
   }
@@ -401,6 +439,7 @@ export class Pulse8CecClient extends EventEmitter {
 
     proc.on('close', (code: number | null) => {
       this.stopAllHolds();
+      this.clearAllPendingPowerTimers();
       this.clearScanTimers();
       const wasReady = this.adapterReady;
       this.adapterReady = false;
@@ -452,6 +491,7 @@ export class Pulse8CecClient extends EventEmitter {
   public stop(): void {
     this.isShuttingDown = true;
     this.stopAllHolds();
+    this.clearAllPendingPowerTimers();
     this.clearScanTimers();
 
     if (this.respawnTimer) {
@@ -681,9 +721,8 @@ export class Pulse8CecClient extends EventEmitter {
           this.stopHold(src);
           this.emitKeyEvent(src, 'mute', 'single');
           this.emitVolumeCommand(src, 'mute', false);
-        } else if (arg === '40' || arg === '6c') {
-          // Remote power button intentionally ignored
-          this.log.debug(`[CEC] Ignoring remote power key (44:${arg}) from logical address ${src}`);
+        } else if (arg === '40' || arg === '6b' || arg === '6c' || arg === '6d') {
+          this.handleRemotePowerKey(src, arg);
         }
         return;
       }
@@ -707,32 +746,171 @@ export class Pulse8CecClient extends EventEmitter {
     // Active Source (0x82) or Image View On (0x04) -> re-assert System Audio Mode so Siri Remote stays in HDMI-CEC volume mode
     if ((dst === 'f' && opcode === '82') || ((dst === '0' || dst === 'f') && opcode === '04')) {
       this.enableSystemAudioMode();
-      this.recordBusPowerState(src, true);
+      this.recordPowerState(src, true, 'bus');
       return;
     }
 
     // Standby (0x36)
     if (dst === 'f' && opcode === '36') {
       this.stopHold(src);
-      this.recordBusPowerState(src, false);
+      this.recordPowerState(src, false, 'bus');
     }
   }
 
-  private recordBusPowerState(src: string, turnOn: boolean): void {
-    const now = Date.now();
-    const prev = this.powerStates.get(src) ?? null;
-    const lastAt = this.lastPowerTransitionAt.get(src) ?? 0;
-
-    if (prev === turnOn && now - lastAt < this.powerDebounceMs) {
+  private handleRemotePowerKey(src: string, arg: string): void {
+    if (this.powerKeyMode === 'ignore') {
+      this.log.debug(`[CEC] Ignoring remote power key (44:${arg}) from logical address ${src}`);
       return;
     }
+
+    if (arg === '6d') {
+      // Dedicated Power On Function
+      this.emitKeyEvent(src, 'powerOn', 'single');
+      if (this.getBusPowerState(src) === true) {
+        this.emitAction(src, 'powerOn', false, 'key');
+      } else {
+        this.recordPowerState(src, true, 'key');
+      }
+      return;
+    }
+
+    if (arg === '6c') {
+      // Dedicated Power Off Function
+      this.stopHold(src);
+      this.emitKeyEvent(src, 'powerOff', 'single');
+      if (this.getBusPowerState(src) === false) {
+        this.emitAction(src, 'powerOff', false, 'key');
+      } else {
+        this.recordPowerState(src, false, 'key');
+      }
+      return;
+    }
+
+    // Power Toggle (44:40 / 44:6b)
+    const current = this.getBusPowerState(src);
+    if (current === null) {
+      // Unknown current state: emit semantic powerToggle + powerOn key, and set state to true
+      this.emitKeyEvent(src, 'powerOn', 'single');
+      this.recordPowerState(src, true, 'key', 'powerToggle');
+    } else {
+      const next = !current;
+      if (!next) {
+        this.stopHold(src);
+      }
+      this.emitKeyEvent(src, next ? 'powerOn' : 'powerOff', 'single');
+      this.recordPowerState(src, next, 'key');
+    }
+  }
+
+  private recordPowerState(
+    src: string,
+    turnOn: boolean,
+    source: 'bus' | 'key',
+    overrideAction?: CecSemanticAction,
+  ): void {
+    const now = Date.now();
+    const prev = this.powerStates.get(src) ?? null;
+    const pending = this.pendingPowerTimers.get(src);
+
+    if (prev === turnOn) {
+      // Steady state reached again; cancel any pending opposite flicker transition
+      if (pending && pending.targetState !== turnOn) {
+        this.clearPendingPowerTimer(src);
+        this.log.debug(
+          `[CEC] Cancelled pending ${pending.targetState ? 'ON' : 'OFF'} flicker transition for ${src}`,
+        );
+      }
+      return;
+    }
+
+    // Optional guard: ignore Standby (0x36) immediately after wake
+    if (!turnOn && source === 'bus' && this.ignoreStandbyAfterWakeMs > 0) {
+      const wakeAt = this.lastWakeAt.get(src) ?? 0;
+      if (wakeAt > 0 && now - wakeAt < this.ignoreStandbyAfterWakeMs) {
+        this.log.debug(
+          `[CEC] Ignoring Standby (0x36) for ${src} (${now - wakeAt}ms after wake < ${this.ignoreStandbyAfterWakeMs}ms)`,
+        );
+        return;
+      }
+    }
+
+    // Guard against rapid true <-> false flicker using powerDebounceMs settle window
+    const lastTransitionAt = this.lastPowerTransitionAt.get(src) ?? 0;
+    if (prev !== null && lastTransitionAt > 0 && this.powerDebounceMs > 0) {
+      const elapsed = now - lastTransitionAt;
+      if (elapsed < this.powerDebounceMs) {
+        if (pending && pending.targetState === turnOn) {
+          return;
+        }
+        this.clearPendingPowerTimer(src);
+        const delayMs = this.powerDebounceMs - elapsed;
+        const timer = setTimeout(() => {
+          this.pendingPowerTimers.delete(src);
+          this.applyPowerTransition(src, turnOn, source, overrideAction);
+        }, delayMs);
+        timer.unref();
+        this.pendingPowerTimers.set(src, { targetState: turnOn, source, timer });
+        this.log.debug(
+          `[CEC] Debouncing rapid power flicker for ${src} -> ${turnOn ? 'ON' : 'OFF'} (${delayMs}ms)`,
+        );
+        return;
+      }
+    }
+
+    this.clearPendingPowerTimer(src);
+    this.applyPowerTransition(src, turnOn, source, overrideAction);
+  }
+
+  private applyPowerTransition(
+    src: string,
+    turnOn: boolean,
+    source: 'bus' | 'key',
+    overrideAction?: CecSemanticAction,
+  ): void {
+    const now = Date.now();
+    const prev = this.powerStates.get(src) ?? null;
     if (prev === turnOn) {
       return;
     }
 
     this.powerStates.set(src, turnOn);
-    this.lastPowerTransitionAt.set(src, now);
-    this.log.debug(`[CEC] Bus state for logical address ${src} -> ${turnOn ? 'ON' : 'OFF'}`);
+    if (turnOn) {
+      this.lastWakeAt.set(src, now);
+    }
+    // Only treat boolean <-> boolean or initial wake (null -> true) as active transitions for flicker debounce,
+    // so initial null -> false (standby observed at boot) does not delay an immediate wake.
+    if (prev !== null || turnOn) {
+      this.lastPowerTransitionAt.set(src, now);
+    }
+
+    this.log.debug(`[CEC] Power state for logical address ${src} -> ${turnOn ? 'ON' : 'OFF'} (via ${source})`);
+
+    const powerEvent: CecPowerChangeEvent = {
+      logicalAddress: src,
+      powered: turnOn,
+      previous: prev,
+      source,
+      timestamp: now,
+    };
+    this.emit('powerChange', powerEvent);
+
+    const action: CecSemanticAction = overrideAction ?? (turnOn ? 'powerOn' : 'powerOff');
+    this.emitAction(src, action, false, source, now);
+  }
+
+  private clearPendingPowerTimer(src: string): void {
+    const pending = this.pendingPowerTimers.get(src);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingPowerTimers.delete(src);
+    }
+  }
+
+  private clearAllPendingPowerTimers(): void {
+    for (const pending of this.pendingPowerTimers.values()) {
+      clearTimeout(pending.timer);
+    }
+    this.pendingPowerTimers.clear();
   }
 
   private handleVolumeKeyPress(src: string, key: 'volumeUp' | 'volumeDown'): void {
@@ -779,7 +957,7 @@ export class Pulse8CecClient extends EventEmitter {
         this.emitKeyEvent(src, key, 'long');
       }, this.holdDelayMs);
 
-      // Even when HomeKit buttons use longPress mode, direct Trinnov volume control smoothly steps while held
+      // Even when HomeKit buttons use longPress mode, direct target volume control smoothly steps while held
       hold.directDelayTimer = setTimeout(() => {
         this.emitVolumeCommand(src, key, true);
         hold.directRepeatTimer = setInterval(() => {
@@ -850,13 +1028,38 @@ export class Pulse8CecClient extends EventEmitter {
     this.emit('keyPress', event);
   }
 
-  private emitVolumeCommand(logicalAddress: string, key: CecKeyType, isRepeat: boolean): void {
+  private emitVolumeCommand(
+    logicalAddress: string,
+    key: 'volumeUp' | 'volumeDown' | 'mute',
+    isRepeat: boolean,
+  ): void {
+    const timestamp = Date.now();
     const event: CecVolumeCommandEvent = {
       logicalAddress,
       key,
       isRepeat,
-      timestamp: Date.now(),
+      timestamp,
     };
     this.emit('volumeCommand', event);
+
+    const semanticAction: CecSemanticAction = key === 'mute' ? 'muteToggle' : key;
+    this.emitAction(logicalAddress, semanticAction, isRepeat, 'key', timestamp);
+  }
+
+  private emitAction(
+    logicalAddress: string,
+    action: CecSemanticAction,
+    isRepeat: boolean,
+    source: 'key' | 'bus',
+    timestamp = Date.now(),
+  ): void {
+    const event: CecActionEvent = {
+      logicalAddress,
+      action,
+      isRepeat,
+      source,
+      timestamp,
+    };
+    this.emit('action', event);
   }
 }

@@ -2,8 +2,8 @@
   "pluginAlias": "Pulse8AppleTvCec",
   "pluginType": "platform",
   "singular": true,
-  "headerDisplay": "Pulse-Eight USB-CEC Apple TV Remote Bridge for Homebridge",
-  "footerDisplay": "Captures Apple TV Siri Remote HDMI-CEC Volume Up, Volume Down, and Mute presses via cec-client (libcec) and exposes them as native HomeKit StatelessProgrammableSwitch buttons, with optional direct Trinnov TCP port 44100 control via homebridge-trinnov discovery.",
+  "headerDisplay": "Pulse-Eight USB-CEC Universal Apple TV Bridge for Homebridge",
+  "footerDisplay": "Captures Apple TV HDMI-CEC button presses and power state via cec-client (libcec), exposing native HomeKit switches/sensors and optionally dispatching actions to any Trinnov, TCP/Telnet AVR, or HTTP webhook target.",
   "schema": {
     "type": "object",
     "properties": {
@@ -77,7 +77,7 @@
             "enum": ["repeat"]
           }
         ],
-        "description": "How holding Volume Up or Volume Down on the Siri Remote maps to HomeKit StatelessProgrammableSwitch events. Direct Trinnov volume control always steps continuously while held."
+        "description": "How holding Volume Up or Volume Down on the Siri Remote maps to HomeKit StatelessProgrammableSwitch events. Direct target commands always step continuously while held."
       },
       "holdDelayMs": {
         "title": "Hold Threshold Delay (ms)",
@@ -123,34 +123,305 @@
         },
         "description": "Optional interval to periodically re-scan the HDMI-CEC bus for newly connected Apple TVs (0 = only scan on startup and unknown device traffic)."
       },
-      "trinnovControl": {
-        "title": "Direct Trinnov Volume Control (TCP 44100)",
+      "powerSensorType": {
+        "title": "HomeKit Power / Activity Service",
+        "type": "string",
+        "default": "none",
+        "oneOf": [
+          {
+            "title": "None (Volume / Mute Buttons Only)",
+            "enum": ["none"]
+          },
+          {
+            "title": "Occupancy Sensor (Recommended for Apple Home Automations)",
+            "enum": ["occupancy"]
+          },
+          {
+            "title": "Switch (On/Off Tile)",
+            "enum": ["switch"]
+          }
+        ],
+        "description": "Optionally expose an OccupancySensor or Switch per Apple TV driven by CEC Active Source (0x82) / Image View On (0x04) and Standby (0x36)."
+      },
+      "includePowerButtons": {
+        "title": "Expose Power On / Power Off Programmable Buttons",
+        "type": "boolean",
+        "default": false,
+        "description": "Adds stateless Power On and Power Off buttons to each Apple TV accessory in HomeKit."
+      },
+      "powerKeyMode": {
+        "title": "Remote Power Key Handling (0x44:40 / 6b / 6c / 6d)",
+        "type": "string",
+        "default": "ignore",
+        "oneOf": [
+          {
+            "title": "Ignore Remote Power Keys (Default)",
+            "enum": ["ignore"]
+          },
+          {
+            "title": "Handle Remote Power Keys (Emit Power Actions & HomeKit Events)",
+            "enum": ["handle"]
+          }
+        ],
+        "description": "Choose whether to ignore CEC remote power button frames or handle them with the configured power debounce and target rules."
+      },
+      "powerDebounceMs": {
+        "title": "Power State Flicker Debounce (ms)",
+        "type": "integer",
+        "default": 1500,
+        "minimum": 0,
+        "maximum": 10000,
+        "x-schema-form": {
+          "type": "number"
+        },
+        "description": "Settle window in milliseconds to filter rapid on/off CEC power flicker."
+      },
+      "ignoreStandbyAfterWakeMs": {
+        "title": "Ignore Standby Immediately After Wake (ms)",
+        "type": "integer",
+        "default": 0,
+        "minimum": 0,
+        "maximum": 15000,
+        "x-schema-form": {
+          "type": "number"
+        },
+        "description": "Optional guard window (in ms) to ignore spurious CEC Standby (0x36) frames arriving immediately after an Apple TV wakes (0 = disabled)."
+      },
+      "targetMode": {
+        "title": "Action Target Driver Mode",
         "type": "string",
         "default": "auto",
         "oneOf": [
           {
-            "title": "Auto (Send directly to Trinnov TCP 44100 when discovered or configured)",
+            "title": "Auto (Auto-discover Homebridge plugins or use configured host)",
             "enum": ["auto"]
           },
           {
-            "title": "Enabled (Always route volume/mute to Trinnov TCP 44100)",
-            "enum": ["enabled"]
+            "title": "Trinnov Processor (TCP 44100 Preset)",
+            "enum": ["trinnov"]
           },
           {
-            "title": "Disabled (HomeKit StatelessProgrammableSwitch buttons only)",
+            "title": "Generic TCP / Telnet AVR (Custom Commands)",
+            "enum": ["tcp"]
+          },
+          {
+            "title": "HTTP Webhook / REST API",
+            "enum": ["http"]
+          },
+          {
+            "title": "Disabled (HomeKit Accessories Only)",
             "enum": ["disabled"]
           }
         ],
-        "description": "Controls whether CEC Volume Up, Volume Down, and Mute presses are sent directly to a Trinnov processor over TCP port 44100 using homebridge-trinnov discovery or Homebridge config."
+        "description": "Select how captured CEC actions are dispatched. HomeKit accessories remain active in all modes."
       },
-      "trinnovHost": {
-        "title": "Trinnov IP / Hostname Override (Optional)",
+      "targetHost": {
+        "title": "Target IP / Hostname (Optional)",
         "type": "string",
         "placeholder": "192.168.1.50",
-        "description": "Leave blank to auto-discover the Trinnov IP from homebridge-trinnov (homebridge-trinnov-discovery.json / HTTP discovery) or Homebridge config.json."
+        "description": "IP address or hostname of the target AVR, processor, or HTTP bridge. Leave blank to auto-discover via Homebridge discovery files or config.json."
+      },
+      "targetPort": {
+        "title": "Target TCP / HTTP Port (Optional)",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535,
+        "x-schema-form": {
+          "type": "number"
+        },
+        "description": "Port of the target device (defaults: 44100 for Trinnov, 23 for TCP, 80 for HTTP)."
+      },
+      "targetVolumeStepDb": {
+        "title": "Target Volume Step (dB / Unit)",
+        "type": "number",
+        "minimum": 0.1,
+        "maximum": 10,
+        "description": "Step value interpolated into {{stepDb}} for each tap or repeat tick (default: 1)."
+      },
+      "targetMuteAction": {
+        "title": "Target Mute Action",
+        "type": "string",
+        "oneOf": [
+          {
+            "title": "Send Mute Command (Default)",
+            "enum": ["toggle"]
+          },
+          {
+            "title": "Ignore Mute Button on Target",
+            "enum": ["ignore"]
+          }
+        ],
+        "description": "Whether Mute presses are forwarded to the configured target driver."
+      },
+      "targetPowerMode": {
+        "title": "Target Power Command Routing",
+        "type": "string",
+        "default": "keysOnly",
+        "oneOf": [
+          {
+            "title": "Remote Power Keys Only (when powerKeyMode is Handle)",
+            "enum": ["keysOnly"]
+          },
+          {
+            "title": "Bus Wake/Standby + Remote Power Keys",
+            "enum": ["all"]
+          },
+          {
+            "title": "Never Send Power Commands to Target",
+            "enum": ["none"]
+          }
+        ],
+        "description": "Controls when powerOn / powerOff actions are forwarded to the target driver."
+      },
+      "targetDiscoveryUrl": {
+        "title": "Target HTTP Discovery URL (Optional)",
+        "type": "string",
+        "placeholder": "http://127.0.0.1:44180/api/cec/targets",
+        "description": "Optional HTTP endpoint returning homebridge-cec-targets / discovery JSON when running across containers or hosts."
+      },
+      "targetClientId": {
+        "title": "Target TCP Client ID (Optional)",
+        "type": "string",
+        "placeholder": "homebridge-pulse8-appletv-cec",
+        "description": "Client identifier interpolated as {{clientId}} during TCP init handshakes (e.g. Trinnov 'id <clientId>')."
+      },
+      "targetIdleTimeoutMs": {
+        "title": "Target TCP Idle Disconnect Timeout (ms)",
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 3600000,
+        "x-schema-form": {
+          "type": "number"
+        },
+        "description": "Milliseconds of inactivity before sending optional 'bye' and closing the TCP socket (default: 60000; 0 = keep connected)."
+      },
+      "targetAutodetectPlugins": {
+        "title": "Additional Homebridge Plugin Names to Autodetect (Optional)",
+        "type": "array",
+        "description": "Optional extra platform/accessory names or keywords to scan in Homebridge config.json alongside built-in AVR/TV presets.",
+        "items": {
+          "type": "string",
+          "placeholder": "MyCustomAvr"
+        }
+      },
+      "tcpCommands": {
+        "title": "Generic TCP Command Templates (for targetMode = 'tcp' or custom overrides)",
+        "type": "object",
+        "description": "Command templates sent over TCP. Supports {{stepDb}}, {{-stepDb}}, {{clientId}}, {{source}}, escaped \\r / \\n, and 'hex:...' binary frames.",
+        "properties": {
+          "init": {
+            "title": "Init / Handshake Command",
+            "type": "string",
+            "placeholder": "id {{clientId}}"
+          },
+          "volumeUp": {
+            "title": "Volume Up Command",
+            "type": "string",
+            "placeholder": "Z1VUP;"
+          },
+          "volumeDown": {
+            "title": "Volume Down Command",
+            "type": "string",
+            "placeholder": "Z1VDN;"
+          },
+          "mute": {
+            "title": "Mute Toggle Command",
+            "type": "string",
+            "placeholder": "Z1MUT;"
+          },
+          "powerOn": {
+            "title": "Power On Command",
+            "type": "string",
+            "placeholder": "Z1POW1;"
+          },
+          "powerOff": {
+            "title": "Power Off Command",
+            "type": "string",
+            "placeholder": "Z1POW0;"
+          },
+          "powerToggle": {
+            "title": "Power Toggle Command",
+            "type": "string"
+          },
+          "bye": {
+            "title": "Disconnect / Bye Command",
+            "type": "string",
+            "placeholder": "bye"
+          },
+          "lineEnding": {
+            "title": "Line Ending (e.g. \\n or \\r)",
+            "type": "string",
+            "placeholder": "\\n"
+          },
+          "bannerIncludes": {
+            "title": "Expected Welcome Banner Substring (Optional)",
+            "type": "string"
+          },
+          "handshakeExpect": {
+            "title": "Expected Handshake Reply Prefix (Optional)",
+            "type": "string"
+          }
+        }
+      },
+      "httpEndpoints": {
+        "title": "HTTP Webhook Endpoints (for targetMode = 'http')",
+        "type": "object",
+        "description": "HTTP endpoint definitions (URL string or { url, method, headers, body }) for each semantic action.",
+        "properties": {
+          "volumeUp": {
+            "title": "Volume Up Endpoint",
+            "type": ["string", "object"]
+          },
+          "volumeDown": {
+            "title": "Volume Down Endpoint",
+            "type": ["string", "object"]
+          },
+          "mute": {
+            "title": "Mute Endpoint",
+            "type": ["string", "object"]
+          },
+          "powerOn": {
+            "title": "Power On Endpoint",
+            "type": ["string", "object"]
+          },
+          "powerOff": {
+            "title": "Power Off Endpoint",
+            "type": ["string", "object"]
+          },
+          "powerToggle": {
+            "title": "Power Toggle Endpoint",
+            "type": ["string", "object"]
+          }
+        }
+      },
+      "trinnovControl": {
+        "title": "[Legacy Alias] Direct Trinnov Volume Control",
+        "type": "string",
+        "default": "auto",
+        "oneOf": [
+          {
+            "title": "Auto (Prefer targetMode if configured)",
+            "enum": ["auto"]
+          },
+          {
+            "title": "Enabled (Maps to targetMode = 'trinnov')",
+            "enum": ["enabled"]
+          },
+          {
+            "title": "Disabled (Maps to targetMode = 'disabled')",
+            "enum": ["disabled"]
+          }
+        ],
+        "description": "Backward-compatible alias for targetMode."
+      },
+      "trinnovHost": {
+        "title": "[Legacy Alias] Trinnov IP / Hostname Override",
+        "type": "string",
+        "placeholder": "192.168.1.50",
+        "description": "Backward-compatible alias for targetHost."
       },
       "trinnovPort": {
-        "title": "Trinnov TCP Port",
+        "title": "[Legacy Alias] Trinnov TCP Port",
         "type": "integer",
         "default": 44100,
         "minimum": 1,
@@ -158,18 +429,18 @@
         "x-schema-form": {
           "type": "number"
         },
-        "description": "Trinnov automation protocol TCP port (default: 44100)."
+        "description": "Backward-compatible alias for targetPort (default: 44100)."
       },
       "trinnovVolumeStepDb": {
-        "title": "Trinnov Volume Step (dB)",
+        "title": "[Legacy Alias] Trinnov Volume Step (dB)",
         "type": "number",
         "default": 1,
         "minimum": 0.1,
         "maximum": 6,
-        "description": "Volume change in dB sent via 'dvolume' on each tap or hold repeat tick (e.g. 0.5 or 1)."
+        "description": "Backward-compatible alias for targetVolumeStepDb."
       },
       "trinnovMuteAction": {
-        "title": "Trinnov Mute Action",
+        "title": "[Legacy Alias] Trinnov Mute Action",
         "type": "string",
         "default": "toggle",
         "oneOf": [
@@ -182,22 +453,22 @@
             "enum": ["ignore"]
           }
         ],
-        "description": "Action sent to Trinnov when the Siri Remote Mute button is pressed."
+        "description": "Backward-compatible alias for targetMuteAction."
       },
       "trinnovDiscoveryUrl": {
-        "title": "homebridge-trinnov Discovery URL (Optional)",
+        "title": "[Legacy Alias] homebridge-trinnov Discovery URL",
         "type": "string",
         "placeholder": "http://127.0.0.1:44180/api/cec/targets",
-        "description": "Optional HTTP endpoint exposed by homebridge-trinnov when running on a separate host/container without shared Homebridge storagePath."
+        "description": "Backward-compatible alias for targetDiscoveryUrl."
       },
       "trinnovClientId": {
-        "title": "Trinnov Client ID",
+        "title": "[Legacy Alias] Trinnov Client ID",
         "type": "string",
         "default": "homebridge-pulse8-appletv-cec",
-        "description": "Identifier sent in the Trinnov 'id <name>' handshake."
+        "description": "Backward-compatible alias for targetClientId."
       },
       "trinnovIdleTimeoutMs": {
-        "title": "Trinnov Idle Disconnect Timeout (ms)",
+        "title": "[Legacy Alias] Trinnov Idle Disconnect Timeout (ms)",
         "type": "integer",
         "default": 60000,
         "minimum": 0,
@@ -205,12 +476,12 @@
         "x-schema-form": {
           "type": "number"
         },
-        "description": "Milliseconds of inactivity before sending 'bye' and closing the Trinnov TCP socket (0 = keep connected)."
+        "description": "Backward-compatible alias for targetIdleTimeoutMs."
       },
       "devices": {
-        "title": "Apple TV Filters & Overrides (Optional)",
+        "title": "Apple TV Filters & Target Overrides (Optional)",
         "type": "array",
-        "description": "By default, all Apple TVs found by 'cec-client scan' are exposed automatically. Add entries here only if you want to filter specific Apple TVs, customize their HomeKit names, or override their Trinnov target.",
+        "description": "By default, all Apple TVs found by 'cec-client scan' are exposed automatically. Add entries here to filter specific Apple TVs, customize their HomeKit names, or override their target driver/host.",
         "items": {
           "title": "Apple TV Filter / Override",
           "type": "object",
@@ -250,25 +521,29 @@
               "default": true,
               "description": "Set to false to ignore this Apple TV."
             },
-            "trinnovEnabled": {
-              "title": "Enable Direct Trinnov Control for this Apple TV",
+            "targetEnabled": {
+              "title": "Enable Direct Target Control for this Apple TV",
               "type": "boolean",
               "default": true,
-              "description": "Set to false to prevent this Apple TV's remote from sending direct TCP commands to Trinnov."
+              "description": "Set to false to prevent this Apple TV's remote from sending direct commands to external targets."
             },
-            "trinnovId": {
-              "title": "Target Trinnov Processor ID / Name (Optional)",
+            "targetDriver": {
+              "title": "Target Driver Override (Optional)",
               "type": "string",
-              "placeholder": "theater-trinnov",
-              "description": "Match a specific Trinnov processor from homebridge-trinnov discovery by its id or name."
+              "enum": ["trinnov", "tcp", "http"]
             },
-            "trinnovHost": {
-              "title": "Trinnov IP / Hostname Override (Optional)",
+            "targetId": {
+              "title": "Target ID / Name (Optional)",
+              "type": "string",
+              "placeholder": "theater-processor"
+            },
+            "targetHost": {
+              "title": "Target IP / Hostname Override (Optional)",
               "type": "string",
               "placeholder": "192.168.1.50"
             },
-            "trinnovPort": {
-              "title": "Trinnov Port Override (Optional)",
+            "targetPort": {
+              "title": "Target Port Override (Optional)",
               "type": "integer",
               "minimum": 1,
               "maximum": 65535,
@@ -277,10 +552,40 @@
               }
             },
             "volumeStepDb": {
-              "title": "Volume Step Override (dB)",
+              "title": "Volume Step Override (dB / Unit)",
               "type": "number",
               "minimum": 0.1,
-              "maximum": 6
+              "maximum": 10
+            },
+            "tcpCommands": {
+              "title": "Per-Apple TV TCP Command Overrides",
+              "type": "object"
+            },
+            "httpEndpoints": {
+              "title": "Per-Apple TV HTTP Endpoint Overrides",
+              "type": "object"
+            },
+            "trinnovEnabled": {
+              "title": "[Legacy Alias] Enable Direct Trinnov Control",
+              "type": "boolean",
+              "default": true
+            },
+            "trinnovId": {
+              "title": "[Legacy Alias] Target Trinnov Processor ID / Name",
+              "type": "string"
+            },
+            "trinnovHost": {
+              "title": "[Legacy Alias] Trinnov IP / Hostname Override",
+              "type": "string"
+            },
+            "trinnovPort": {
+              "title": "[Legacy Alias] Trinnov Port Override",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "x-schema-form": {
+                "type": "number"
+              }
             }
           }
         }
